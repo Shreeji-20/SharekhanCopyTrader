@@ -1,0 +1,614 @@
+{
+  "info": {
+    "_postman_id": "642e84dd-dbdd-44f9-ba32-aadbba02ac03",
+    "name": "Sharekhan Api",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "40810054"
+  },
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "GetAccessToken",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"apiKey\": \"{{apiKey}}\",\r\n    \"requestToken\":\"{{FinalEncryptedToken}}\",\r\n    \"state\":{{state}} ,\r\n    \"versionId\":{{versionId}}\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "https://api.sharekhan.com/skapi/services/access/token",
+              "protocol": "https",
+              "host": [
+                "api",
+                "sharekhan",
+                "com"
+              ],
+              "path": [
+                "skapi",
+                "services",
+                "access",
+                "token"
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "GetRequestToken",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "https://api.sharekhan.com/skapi/auth/login.html?api_key={{apiKey}}",
+              "protocol": "https",
+              "host": [
+                "api",
+                "sharekhan",
+                "com"
+              ],
+              "path": [
+                "skapi",
+                "auth",
+                "login.html"
+              ],
+              "query": [
+                {
+                  "key": "api_key",
+                  "value": "{{apiKey}}"
+                }
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Orders",
+      "item": [
+        {
+          "name": "New Order",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "access-token",
+                "value": "{{accessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "api-key",
+                "value": "{{apiKey}}",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n\"customerId\": {{customerId}},\r\n\"scripCode\": 2475,\r\n\"tradingSymbol\": \"ONGC\",\r\n\"exchange\": \"NC\",\r\n\"transactionType\": \"B\",\r\n\"quantity\": 1,\r\n\"disclosedQty\": 0,\r\n\"price\": \"250\",\r\n\"triggerPrice\": \"0\",\r\n\"rmsCode\": \"ANY\",\r\n\"afterHour\": \"N\",\r\n\"orderType\": \"NORMAL\",\r\n\"channelUser\": \"{{loginId}}\",\r\n\"validity\": \"GFD\",\r\n\"requestType\": \"NEW\",\r\n\"productType\": \"INVESTMENT\"\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "https://api.sharekhan.com/skapi/services/orders",
+              "protocol": "https",
+              "host": [
+                "api",
+                "sharekhan",
+                "com"
+              ],
+              "path": [
+                "skapi",
+                "services",
+                "orders"
+              ]
+            },
+            "description": "New order"
+          },
+          "response": []
+        },
+        {
+          "name": "RetriveAllOrders",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "access-token",
+                "value": "{{accessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "api-key",
+                "value": "{{apiKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "https://api.sharekhan.com/skapi/services/reports/{{customerId}}",
+              "protocol": "https",
+              "host": [
+                "api",
+                "sharekhan",
+                "com"
+              ],
+              "path": [
+                "skapi",
+                "services",
+                "reports",
+                "{{customerId}}"
+              ]
+            },
+            "description": "Retrieves all orders for the day"
+          },
+          "response": []
+        },
+        {
+          "name": "RetriveHistoryOfOrder",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "access-token",
+                "value": "{{accessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "api-key",
+                "value": "{{apiKey}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "https://api.sharekhan.com/skapi/services/reports/NC/{{customerId}}/254693575",
+              "protocol": "https",
+              "host": [
+                "api",
+                "sharekhan",
+                "com"
+              ],
+              "path": [
+                "skapi",
+                "services",
+                "reports",
+                "NC",
+                "{{customerId}}",
+                "254693575"
+              ]
+            },
+            "description": "Retrieves the history of a given order"
+          },
+          "response": []
+        },
+        {
+          "name": "GetTradeGeneratedByOrder",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "access-token",
+                "value": "{{accessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "api-key",
+                "value": "{{apiKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "https://api.sharekhan.com/skapi/services/reports/NC/{{customerId}}/254693575/trades",
+              "protocol": "https",
+              "host": [
+                "api",
+                "sharekhan",
+                "com"
+              ],
+              "path": [
+                "skapi",
+                "services",
+                "reports",
+                "NC",
+                "{{customerId}}",
+                "254693575",
+                "trades"
+              ]
+            },
+            "description": "Retrieves the trade generated by an order"
+          },
+          "response": []
+        },
+        {
+          "name": "Cancel Order",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "access-token",
+                "value": "{{accessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "api-key",
+                "value": "{{apiKey}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"orderId\":\"254725785\",\r\n    \"customerId\": {{customerId}},\r\n    \"scripCode\": 2475,\r\n    \"tradingSymbol\": \"ONGC\",\r\n    \"exchange\": \"NC\",\r\n    \"transactionType\": \"B\",\r\n    \"quantity\": 1,\r\n    \"disclosedQty\": 0,\r\n    \"price\": \"250\",\r\n    \"triggerPrice\": \"0\",\r\n    \"rmsCode\": \"ANY\",\r\n    \"afterHour\": \"N\",\r\n    \"orderType\": \"NORMAL\",\r\n    \"channelUser\": \"{{loginId}}\",\r\n    \"validity\": \"GFD\",\r\n    \"requestType\": \"CANCEL\",\r\n    \"productType\": \"INVESTMENT\"\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "https://api.sharekhan.com/skapi/services/orders",
+              "protocol": "https",
+              "host": [
+                "api",
+                "sharekhan",
+                "com"
+              ],
+              "path": [
+                "skapi",
+                "services",
+                "orders"
+              ]
+            },
+            "description": "Cancel an existing order"
+          },
+          "response": []
+        },
+        {
+          "name": "Modify Order",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "access-token",
+                "value": "{{accessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "api-key",
+                "value": "{{apiKey}}",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"orderId\":\"254716067\",\r\n    \"customerId\": {{customerId}},\r\n    \"scripCode\": 2475,\r\n    \"tradingSymbol\": \"ONGC\",\r\n    \"exchange\": \"NC\",\r\n    \"transactionType\": \"B\",\r\n    \"quantity\": 1,\r\n    \"disclosedQty\": 0,\r\n    \"price\": \"271\",\r\n    \"triggerPrice\": \"0\",\r\n    \"rmsCode\": \"ANY\",\r\n    \"afterHour\": \"N\",\r\n    \"orderType\": \"NORMAL\",\r\n    \"channelUser\": \"{{loginId}}\",\r\n    \"validity\": \"GFD\",\r\n    \"requestType\": \"MODIFY\",\r\n    \"productType\": \"INVESTMENT\"\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "https://api.sharekhan.com/skapi/services/orders",
+              "protocol": "https",
+              "host": [
+                "api",
+                "sharekhan",
+                "com"
+              ],
+              "path": [
+                "skapi",
+                "services",
+                "orders"
+              ]
+            },
+            "description": "Modify open order"
+          },
+          "response": []
+        },
+        {
+          "name": "Derivatives Order",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "access-token",
+                "value": "{{accessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "api-key",
+                "value": "{{apiKey}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n\"customerId\": \"{{customerId}}\",\r\n\"scripCode\": 60530,\r\n\"tradingSymbol\": \"NIFTY\",\r\n\"exchange\": \"NF\",\r\n\"transactionType\": \"B\",\r\n\"quantity\": 75,\r\n\"triggerPrice\": \"0\",\r\n\"price\": \"0\",\r\n\"rmsCode\": \"ANY\",\r\n\"afterHour\": \"N\",\r\n\"orderType\": \"NORMAL\",\r\n\"expiry\": \"09/06/2026\",\r\n\"instrumentType\": \"FI\",\r\n\"optionType\": \"CE\",\r\n\"strikePrice\": \"23400\",\r\n\"channelUser\": \"{{loginId}}\",\r\n\"validity\": \"GFD\",\r\n\"requestType\": \"NEW\",\r\n\"productType\": \"INVESTMENT\"\r\n}"
+            },
+            "url": {
+              "raw": "https://api.sharekhan.com/skapi/services/orders",
+              "protocol": "https",
+              "host": [
+                "api",
+                "sharekhan",
+                "com"
+              ],
+              "path": [
+                "skapi",
+                "services",
+                "orders"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Positions",
+      "item": [
+        {
+          "name": "RetriveAllPositions",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "access-token",
+                "value": "{{accessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "api-key",
+                "value": "{{apiKey}}",
+                "description": "\n",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "https://api.sharekhan.com/skapi/services/trades/{{customerId}}",
+              "protocol": "https",
+              "host": [
+                "api",
+                "sharekhan",
+                "com"
+              ],
+              "path": [
+                "skapi",
+                "services",
+                "trades",
+                "{{customerId}}"
+              ]
+            },
+            "description": "Retrieves all positions"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Websocket",
+      "item": []
+    },
+    {
+      "name": "Accounts",
+      "item": [
+        {
+          "name": "GetAccountDetails",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "access-token",
+                "value": "{{accessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "api-key",
+                "value": "{{apiKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "https://api.sharekhan.com/skapi/services/limitstmt/NSE/{{customerId}}",
+              "protocol": "https",
+              "host": [
+                "api",
+                "sharekhan",
+                "com"
+              ],
+              "path": [
+                "skapi",
+                "services",
+                "limitstmt",
+                "NSE",
+                "{{customerId}}"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Holdings",
+      "item": [
+        {
+          "name": "GetHoldings",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "header": [
+              {
+                "key": "access-token",
+                "value": "{{accessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "api-key",
+                "value": "{{apiKey}}",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"apiKey\": \"{{apiKey}}\"\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "https://api.sharekhan.com/skapi/services/holdings/{{customerId}}",
+              "protocol": "https",
+              "host": [
+                "api",
+                "sharekhan",
+                "com"
+              ],
+              "path": [
+                "skapi",
+                "services",
+                "holdings",
+                "{{customerId}}"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Historical Data",
+      "item": [
+        {
+          "name": "Historical Chart Data",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "access-token",
+                "value": "{{accessToken}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "api-key",
+                "value": "{{apiKey}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "https://api.sharekhan.com/skapi/services/historical/NC/2475/5minute",
+              "protocol": "https",
+              "host": [
+                "api",
+                "sharekhan",
+                "com"
+              ],
+              "path": [
+                "skapi",
+                "services",
+                "historical",
+                "NC",
+                "2475",
+                "5minute"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "New Folder",
+      "item": [
+        {
+          "name": "GetScripMaster",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "https://api.sharekhan.com/skapi/services/master/NC",
+              "protocol": "https",
+              "host": [
+                "api",
+                "sharekhan",
+                "com"
+              ],
+              "path": [
+                "skapi",
+                "services",
+                "master",
+                "NC"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
