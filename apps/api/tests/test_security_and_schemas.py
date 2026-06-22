@@ -13,11 +13,14 @@ from app.encryption import decrypt_secret, encrypt_secret
 from app.schemas import (
     BrokerAccountCreate,
     BrokerAccountUpdate,
+    CopyGroupMemberCreate,
+    CopySettingPatch,
     SharekhanCallbackExchange,
     SharekhanOrderPayload,
     SharekhanWsSubscription,
 )
 from app.security import mask_secret
+from app.services.script_master_preload import script_master_preload_exchanges_from_profile
 
 
 def test_token_masking() -> None:
@@ -38,6 +41,24 @@ def test_sharekhan_callback_can_resolve_by_state_without_browser_account_id() ->
 
     assert payload.account_id is None
     assert payload.state == "12345678"
+
+
+def test_script_master_preload_exchange_selection_uses_profile_and_config() -> None:
+    exchanges = script_master_preload_exchanges_from_profile(
+        {"exchanges": ["nc", "NF", " "]},
+        ["NC", "BC"],
+    )
+
+    assert exchanges == ["NC", "NF", "BC"]
+
+
+def test_script_master_preload_exchange_setting_parses_csv(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCRIPT_MASTER_PRELOAD_EXCHANGES", "nc,nf,bc")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().script_master_preload_exchange_codes == ["NC", "NF", "BC"]
+    finally:
+        get_settings.cache_clear()
 
 
 def test_account_response_survives_unreadable_encrypted_fields(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -189,3 +210,29 @@ def test_sharekhan_ws_subscription_normalizes_exchange_and_symbols() -> None:
 
     assert payload.exchange == "NC"
     assert payload.symbols == ["2885"]
+
+
+def test_copy_setting_validation_rejects_invalid_limits() -> None:
+    with pytest.raises(ValidationError):
+        CopySettingPatch(min_qty=10, max_qty=5)
+
+    with pytest.raises(ValidationError):
+        CopySettingPatch(sizing_mode="FIXED_QTY")
+
+
+def test_copy_group_member_create_accepts_group_scoped_risk_setting() -> None:
+    payload = CopyGroupMemberCreate(
+        copy_account_id=uuid.uuid4(),
+        copy_setting={
+            "sizing_mode": "MULTIPLIER",
+            "multiplier": Decimal("2"),
+            "allowed_symbols": [" ongc ", "ONGC"],
+            "allowed_transaction_types": ["b"],
+            "max_trades_per_day": 3,
+        },
+    )
+
+    assert payload.copy_setting is not None
+    assert payload.copy_setting.allowed_symbols == ["ONGC"]
+    assert payload.copy_setting.allowed_transaction_types == ["B"]
+    assert payload.copy_setting.max_trades_per_day == 3

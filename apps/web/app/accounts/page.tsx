@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, ChevronDown, Edit, ExternalLink, Loader2, LogIn, Plus, RefreshCw, Save, Trash2, X } from "lucide-react";
+import { ChevronDown, Edit, ExternalLink, Loader2, LogIn, Plus, RefreshCw, Save, Trash2, X } from "lucide-react";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";

@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
-from app.routers import accounts, auth, copy_groups, copy_sessions, copy_settings, dashboard, live, logs, orders, portfolio, script_master, system
+from app.routers import accounts, auth, copy_groups, copy_sessions, copy_settings, dashboard, live, logs, portfolio, script_master, system
 from app.services.live_copy import live_copy_manager
 
 settings = get_settings()
@@ -38,7 +38,6 @@ app.include_router(accounts.router)
 app.include_router(copy_groups.router)
 app.include_router(copy_sessions.router)
 app.include_router(copy_settings.router)
-app.include_router(orders.router)
 app.include_router(portfolio.router)
 app.include_router(logs.router)
 app.include_router(dashboard.router)

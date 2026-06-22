@@ -106,6 +106,14 @@ function diagnosticKey(kind: string, type: string, timestamp: string, payload: u
   return `${kind}-${type}-${timestamp}-${payloadText.slice(0, 120)}`;
 }
 
+function formatPayload(payload: unknown) {
+  try {
+    return JSON.stringify(payload, null, 2);
+  } catch {
+    return String(payload);
+  }
+}
+
 export default function LiveCopyPage() {
   const queryClient = useQueryClient();
   const [masterAccountId, setMasterAccountId] = useState("");
@@ -141,7 +149,7 @@ export default function LiveCopyPage() {
     () => groups.filter((group) => group.master_account_id === masterAccountId && group.is_active),
     [groups, masterAccountId]
   );
-  const activeSession = sessions.find((session) => session.id === selectedSessionId) ?? sessions[0];
+  const activeSession = selectedSessionId ? sessions.find((session) => session.id === selectedSessionId) : sessions[0];
 
   const {data: events = []} = useQuery({
     queryKey: ["copy-session-events", activeSession?.id],
@@ -228,13 +236,14 @@ export default function LiveCopyPage() {
     );
   }
 
-  const sentMessages = streamStatus?.sent_payloads?.slice(-4).reverse() ?? [];
-  const recentMessages = streamStatus?.recent_messages?.slice(-5).reverse() ?? [];
+  const sentMessages = streamStatus?.sent_payloads?.slice().reverse() ?? [];
+  const recentMessages = streamStatus?.recent_messages?.slice().reverse() ?? [];
 
   return (
     <Page title="Live Copy Trading">
-      <div className="grid min-w-0 items-start gap-4 xl:grid-cols-[minmax(320px,380px)_minmax(0,1fr)]">
-        <div className="grid min-w-0 content-start gap-4">
+      <div className="grid min-w-0 gap-4">
+        <div className="grid min-w-0 items-start gap-4 xl:grid-cols-[minmax(320px,380px)_minmax(0,1fr)]">
+          <div className="grid min-w-0 content-start gap-4">
           <Card>
             <CardHeader>
               <CardTitle>Start Session</CardTitle>
@@ -388,73 +397,6 @@ export default function LiveCopyPage() {
             </CardContent>
           </Card>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Stream Status</CardTitle>
-              <RadioTower className="h-4 w-4 text-muted-foreground" />
-            </CardHeader>
-            <CardContent className="grid gap-3 text-sm">
-              <div className="grid min-w-0 gap-2 rounded-md border p-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">Connection</span>
-                  <Badge>{streamStatus?.is_connected ? "CONNECTED" : "DISCONNECTED"}</Badge>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">Modules</span>
-                  <Badge>{streamStatus?.module_ready ? "READY" : "PENDING"}</Badge>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">Ack subscribe</span>
-                  <Badge>{streamStatus?.ack_subscription_sent ? "SENT" : "PENDING"}</Badge>
-                </div>
-                <div className="grid gap-1 text-xs text-muted-foreground">
-                  <span>Messages: {streamStatus?.messages_received ?? 0}</span>
-                  <span>Ack: {streamStatus?.ack_messages_received ?? 0}</span>
-                  <span>Feed: {streamStatus?.feed_messages_received ?? 0}</span>
-                  <span>Last: {streamStatus?.last_message_at ?? "-"}</span>
-                  <span>Customer: {String(streamStatus?.customer_id_present ?? false)}</span>
-                  <span>Proxy: {String(streamStatus?.proxy_configured ?? false)}</span>
-                </div>
-                {streamStatus?.last_error ? <div className="break-words text-destructive">{streamStatus.last_error}</div> : null}
-              </div>
-              {streamStatus?.last_sent_payload ? (
-                <pre className="max-h-36 min-w-0 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted p-3 text-xs">
-                  {JSON.stringify(streamStatus.last_sent_payload, null, 2)}
-                </pre>
-              ) : null}
-              {sentMessages.length ? (
-                <div className="grid max-h-72 min-w-0 gap-2 overflow-auto pr-1">
-                  {sentMessages.map((message) => (
-                    <div key={diagnosticKey("sent", message.type, message.sent_at, message.payload)} className="min-w-0 overflow-hidden rounded-md border p-3">
-                      <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
-                        <Badge>{message.type.toUpperCase()}</Badge>
-                        <span className="min-w-0 truncate text-right text-xs text-muted-foreground">{message.sent_at}</span>
-                      </div>
-                      <pre className="max-h-28 min-w-0 overflow-auto whitespace-pre-wrap break-words text-xs text-muted-foreground">
-                        {JSON.stringify(message.payload, null, 2)}
-                      </pre>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-              {recentMessages.length ? (
-                <div className="grid max-h-80 min-w-0 gap-2 overflow-auto pr-1">
-                  {recentMessages.map((message) => (
-                    <div key={diagnosticKey("received", message.type, message.received_at, message.payload)} className="min-w-0 overflow-hidden rounded-md border p-3">
-                      <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
-                        <Badge>{message.type.toUpperCase()}</Badge>
-                        <span className="min-w-0 truncate text-right text-xs text-muted-foreground">{message.received_at}</span>
-                      </div>
-                      <pre className="max-h-28 min-w-0 overflow-auto whitespace-pre-wrap break-words text-xs text-muted-foreground">
-                        {JSON.stringify(message.payload, null, 2)}
-                      </pre>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-            </CardContent>
-          </Card>
-
           {warnings.length ? (
             <Card>
               <CardHeader>
@@ -561,6 +503,101 @@ export default function LiveCopyPage() {
             </CardContent>
           </Card>
         </div>
+        </div>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Stream Status</CardTitle>
+            <RadioTower className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent className="grid gap-4 text-sm">
+            <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(240px,320px)_minmax(0,1fr)]">
+              <div className="grid min-w-0 gap-2 rounded-md border p-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Connection</span>
+                  <Badge>{streamStatus?.is_connected ? "CONNECTED" : "DISCONNECTED"}</Badge>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Modules</span>
+                  <Badge>{streamStatus?.module_ready ? "READY" : "PENDING"}</Badge>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-muted-foreground">Ack subscribe</span>
+                  <Badge>{streamStatus?.ack_subscription_sent ? "SENT" : "PENDING"}</Badge>
+                </div>
+                <div className="grid gap-1 text-xs text-muted-foreground">
+                  <span>Messages: {streamStatus?.messages_received ?? 0}</span>
+                  <span>Ack: {streamStatus?.ack_messages_received ?? 0}</span>
+                  <span>Feed: {streamStatus?.feed_messages_received ?? 0}</span>
+                  <span>Raw: {streamStatus?.raw_messages_received ?? 0}</span>
+                  <span>Last: {streamStatus?.last_message_at ?? "-"}</span>
+                  <span>Customer: {String(streamStatus?.customer_id_present ?? false)}</span>
+                  <span>Proxy: {String(streamStatus?.proxy_configured ?? false)}</span>
+                </div>
+                {streamStatus?.last_error ? <div className="break-words text-destructive">{streamStatus.last_error}</div> : null}
+              </div>
+              <div className="grid min-w-0 gap-2">
+                <div className="flex min-w-0 items-center justify-between gap-2">
+                  <span className="text-xs font-medium text-muted-foreground">Last sent payload</span>
+                  <Badge>{streamStatus?.last_sent_payload ? "READY" : "EMPTY"}</Badge>
+                </div>
+                <pre className="max-h-52 min-w-0 overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted p-3 text-xs text-muted-foreground">
+                  {streamStatus?.last_sent_payload ? formatPayload(streamStatus.last_sent_payload) : "-"}
+                </pre>
+              </div>
+            </div>
+
+            <div className="grid min-w-0 gap-4 xl:grid-cols-2">
+              <div className="grid min-w-0 gap-2">
+                <div className="flex min-w-0 items-center justify-between gap-2">
+                  <span className="text-xs font-medium text-muted-foreground">Sent frames</span>
+                  <Badge>{sentMessages.length}</Badge>
+                </div>
+                <div className="grid max-h-[560px] min-w-0 content-start gap-2 overflow-auto rounded-md border p-2">
+                  {sentMessages.length ? (
+                    sentMessages.map((message) => (
+                      <div key={diagnosticKey("sent", message.type, message.sent_at, message.payload)} className="min-w-0 overflow-hidden rounded-md border p-3">
+                        <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
+                          <Badge>{message.type.toUpperCase()}</Badge>
+                          <span className="min-w-0 truncate text-right text-xs text-muted-foreground">{message.sent_at}</span>
+                        </div>
+                        <pre className="max-h-72 min-w-0 overflow-auto whitespace-pre-wrap break-words text-xs text-muted-foreground">
+                          {formatPayload(message.payload)}
+                        </pre>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="rounded-md border p-3 text-xs text-muted-foreground">No sent frames</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="grid min-w-0 gap-2">
+                <div className="flex min-w-0 items-center justify-between gap-2">
+                  <span className="text-xs font-medium text-muted-foreground">Inbound stream</span>
+                  <Badge>{recentMessages.length}</Badge>
+                </div>
+                <div className="grid max-h-[560px] min-w-0 content-start gap-2 overflow-auto rounded-md border p-2">
+                  {recentMessages.length ? (
+                    recentMessages.map((message) => (
+                      <div key={diagnosticKey("received", message.type, message.received_at, message.payload)} className="min-w-0 overflow-hidden rounded-md border p-3">
+                        <div className="mb-2 flex min-w-0 items-center justify-between gap-2">
+                          <Badge>{message.type.toUpperCase()}</Badge>
+                          <span className="min-w-0 truncate text-right text-xs text-muted-foreground">{message.received_at}</span>
+                        </div>
+                        <pre className="max-h-72 min-w-0 overflow-auto whitespace-pre-wrap break-words text-xs text-muted-foreground">
+                          {formatPayload(message.payload)}
+                        </pre>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="rounded-md border p-3 text-xs text-muted-foreground">No inbound messages</div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
       </div>
     </Page>
   );

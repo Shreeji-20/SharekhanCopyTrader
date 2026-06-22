@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import json
 import logging
@@ -123,6 +124,15 @@ LOT_SIZE_FIELDS = (
     "MarketLot",
     "SEM_LOT_UNITS",
 )
+TICK_SIZE_FIELDS = (
+    "tickSize",
+    "TickSize",
+    "tick_size",
+    "ticksize",
+    "priceTick",
+    "PriceTick",
+    "SEM_TICK_SIZE",
+)
 ISIN_FIELDS = ("isin", "ISIN", "isinCode", "IsinCode", "SEM_ISIN_CODE")
 
 
@@ -152,8 +162,35 @@ class NormalizedScriptMasterRow:
     strike_price: Decimal | None
     expiry_date: date | None
     lot_size: int | None
+    tick_size: Decimal | None
     isin: str | None
     raw_payload_json: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class CachedScriptMasterRecord:
+    id: uuid.UUID | None
+    exchange: str
+    segment: str | None
+    scrip_code: str
+    trading_symbol: str
+    symbol_name: str | None
+    underlying_symbol: str | None
+    instrument_type: str | None
+    option_type: str | None
+    strike_price: Decimal | None
+    expiry_date: date | None
+    lot_size: int | None
+    tick_size: Decimal | None
+    isin: str | None
+
+
+@dataclass(frozen=True)
+class ScriptMasterExchangeCache:
+    exchange: str
+    records: tuple[CachedScriptMasterRecord, ...]
+    refreshed_at: datetime | None
+    identity_index: dict[tuple[str, str], tuple[CachedScriptMasterRecord, ...]]
 
 
 @dataclass(frozen=True)
@@ -247,6 +284,7 @@ def normalize_script_master_row(raw: dict[str, Any], fallback_exchange: str) -> 
         strike_price=strike_price,
         expiry_date=_date_or_none(_field(raw, *EXPIRY_FIELDS)),
         lot_size=_int_or_none(_field(raw, *LOT_SIZE_FIELDS)),
+        tick_size=_decimal_or_none(_field(raw, *TICK_SIZE_FIELDS)),
         isin=_code(_field(raw, *ISIN_FIELDS)) or None,
         raw_payload_json=_json_ready_dict(raw),
     )
@@ -307,17 +345,43 @@ def match_script_master_records(records: Sequence[Any], lookup: ScriptMasterLook
 class ScriptMasterService:
     def __init__(self, broker_router: BrokerRouterClient | None = None) -> None:
         self.broker_router = broker_router or BrokerRouterClient()
+        self._exchange_cache: dict[str, ScriptMasterExchangeCache] = {}
+        self._exchange_locks: dict[str, asyncio.Lock] = {}
+
+    def invalidate_exchange_cache(self, exchange: str) -> None:
+        self._exchange_cache.pop(_code(exchange), None)
+
+    def clear_memory_cache(self) -> None:
+        self._exchange_cache.clear()
+
+    def memory_cache_info(self, exchange: str) -> dict[str, Any]:
+        exchange = _code(exchange)
+        cache = self._exchange_cache.get(exchange)
+        return {
+            "exchange": exchange,
+            "records": len(cache.records) if cache else 0,
+            "refreshed_at": cache.refreshed_at.isoformat() if cache and cache.refreshed_at else None,
+            "indexed_keys": len(cache.identity_index) if cache else 0,
+            "loaded": cache is not None,
+        }
 
     async def refresh_exchange(self, db: AsyncSession, exchange: str, account_id: uuid.UUID) -> dict[str, Any]:
         exchange = _code(exchange)
         if not exchange:
             raise ValueError("exchange is required")
+        async with self._exchange_lock(exchange):
+            return await self._refresh_exchange_unlocked(db, exchange, account_id)
+
+    async def _refresh_exchange_unlocked(self, db: AsyncSession, exchange: str, account_id: uuid.UUID) -> dict[str, Any]:
         logger.info("script_master.fetch_started", extra={"exchange": exchange, "account_id": str(account_id)})
         response = await self.broker_router.master(exchange, account_id)
         rows = normalize_script_master_response(response, exchange)
         refreshed_at = utcnow()
         if not rows:
             logger.warning("script_master.fetch_empty", extra={"exchange": exchange, "account_id": str(account_id)})
+            existing = self._exchange_cache.get(exchange)
+            if existing is None or not existing.records:
+                self._store_exchange_cache(exchange, (), refreshed_at)
             return {"exchange": exchange, "records": 0, "refreshed_at": refreshed_at}
 
         await db.execute(delete(ScriptMasterInstrument).where(ScriptMasterInstrument.exchange == exchange))
@@ -325,6 +389,11 @@ class ScriptMasterService:
         for chunk in _chunks(values, 1000):
             await db.execute(insert(ScriptMasterInstrument), chunk)
         await db.flush()
+        self._store_exchange_cache(
+            exchange,
+            tuple(_cached_record_from_values(value) for value in values),
+            refreshed_at,
+        )
         logger.info(
             "script_master.fetch_completed",
             extra={"exchange": exchange, "account_id": str(account_id), "records": len(values)},
@@ -341,10 +410,16 @@ class ScriptMasterService:
         db: AsyncSession,
         lookup: ScriptMasterLookup,
         account_id: uuid.UUID,
+        refresh_stale: bool = True,
     ) -> ScriptMasterResolution:
         lookup = _normalize_lookup(lookup)
         try:
-            refreshed = await self.ensure_exchange_cache(db, lookup.exchange, account_id)
+            records, refreshed = await self._records_for_resolution(
+                db,
+                lookup,
+                account_id,
+                refresh_stale=refresh_stale,
+            )
         except Exception as exc:
             logger.exception("script_master.fetch_failed", extra={"exchange": lookup.exchange, "account_id": str(account_id)})
             return ScriptMasterResolution(
@@ -352,7 +427,6 @@ class ScriptMasterService:
                 message=f"scripCode missing and could not be resolved because Script Master cache for {lookup.exchange} could not be loaded: {exc}",
             )
 
-        records = await self._load_lookup_records(db, lookup)
         resolution = match_script_master_records(records, lookup)
         resolution = ScriptMasterResolution(
             status=resolution.status,
@@ -365,29 +439,143 @@ class ScriptMasterService:
         self._log_resolution(lookup, resolution)
         return resolution
 
-    async def ensure_exchange_cache(self, db: AsyncSession, exchange: str, account_id: uuid.UUID) -> bool:
+    async def ensure_exchange_cache(
+        self,
+        db: AsyncSession,
+        exchange: str,
+        account_id: uuid.UUID,
+        refresh_stale: bool = True,
+    ) -> bool:
         exchange = _code(exchange)
-        count, refreshed_at = await self._cache_status(db, exchange)
-        ttl_hours = max(1, get_settings().script_master_cache_ttl_hours)
-        stale_before = utcnow() - timedelta(hours=ttl_hours)
-        if count > 0 and refreshed_at and refreshed_at > stale_before:
-            logger.info(
-                "script_master.cache_loaded",
-                extra={"exchange": exchange, "records": count, "refreshed_at": refreshed_at.isoformat()},
-            )
-            return False
-        try:
-            await self.refresh_exchange(db, exchange, account_id)
-            return True
-        except Exception:
-            if count > 0:
-                logger.warning(
-                    "script_master.fetch_failed_using_stale_cache",
-                    extra={"exchange": exchange, "records": count, "refreshed_at": refreshed_at.isoformat() if refreshed_at else None},
-                    exc_info=True,
+        if not exchange:
+            raise ValueError("exchange is required")
+        async with self._exchange_lock(exchange):
+            cache = self._exchange_cache.get(exchange)
+            if cache is None:
+                cache = await self._load_exchange_cache_unlocked(db, exchange)
+            count, refreshed_at = len(cache.records), cache.refreshed_at
+            ttl_hours = max(1, get_settings().script_master_cache_ttl_hours)
+            stale_before = utcnow() - timedelta(hours=ttl_hours)
+            if self._cache_is_usable(cache, stale_before=stale_before, refresh_stale=refresh_stale):
+                logger.info(
+                    "script_master.cache_loaded",
+                    extra={
+                        "exchange": exchange,
+                        "records": count,
+                        "refreshed_at": refreshed_at.isoformat() if refreshed_at else None,
+                        "stale": bool(refreshed_at and refreshed_at <= stale_before),
+                        "refresh_stale": refresh_stale,
+                    },
                 )
                 return False
-            raise
+            try:
+                await self._refresh_exchange_unlocked(db, exchange, account_id)
+                return True
+            except Exception:
+                if count > 0:
+                    logger.warning(
+                        "script_master.fetch_failed_using_stale_cache",
+                        extra={"exchange": exchange, "records": count, "refreshed_at": refreshed_at.isoformat() if refreshed_at else None},
+                        exc_info=True,
+                    )
+                    return False
+                raise
+
+    async def _records_for_resolution(
+        self,
+        db: AsyncSession,
+        lookup: ScriptMasterLookup,
+        account_id: uuid.UUID,
+        refresh_stale: bool,
+    ) -> tuple[list[CachedScriptMasterRecord], bool]:
+        refreshed = await self.ensure_exchange_cache(db, lookup.exchange, account_id, refresh_stale=refresh_stale)
+        cache = self._exchange_cache.get(lookup.exchange)
+        if cache is None:
+            cache = await self._load_exchange_cache(db, lookup.exchange)
+        records = self._lookup_cached_records(cache, lookup)
+        return records, refreshed
+
+    async def _load_exchange_cache(self, db: AsyncSession, exchange: str) -> ScriptMasterExchangeCache:
+        exchange = _code(exchange)
+        cached = self._exchange_cache.get(exchange)
+        if cached is not None:
+            logger.info(
+                "script_master.memory_cache_hit",
+                extra={
+                    "exchange": exchange,
+                    "records": len(cached.records),
+                    "refreshed_at": cached.refreshed_at.isoformat() if cached.refreshed_at else None,
+                },
+            )
+            return cached
+        async with self._exchange_lock(exchange):
+            cached = self._exchange_cache.get(exchange)
+            if cached is not None:
+                return cached
+            return await self._load_exchange_cache_unlocked(db, exchange)
+
+    async def _load_exchange_cache_unlocked(self, db: AsyncSession, exchange: str) -> ScriptMasterExchangeCache:
+        rows = (
+            await db.scalars(
+                select(ScriptMasterInstrument).where(ScriptMasterInstrument.exchange == exchange)
+            )
+        ).all()
+        refreshed_at = max((row.refreshed_at for row in rows if row.refreshed_at), default=None)
+        cache = self._store_exchange_cache(
+            exchange,
+            tuple(_cached_record_from_model(row) for row in rows),
+            refreshed_at,
+        )
+        logger.info(
+            "script_master.memory_cache_loaded",
+            extra={
+                "exchange": exchange,
+                "records": len(cache.records),
+                "refreshed_at": refreshed_at.isoformat() if refreshed_at else None,
+            },
+        )
+        return cache
+
+    def _exchange_lock(self, exchange: str) -> asyncio.Lock:
+        return self._exchange_locks.setdefault(_code(exchange), asyncio.Lock())
+
+    @staticmethod
+    def _cache_is_usable(cache: ScriptMasterExchangeCache, *, stale_before: datetime, refresh_stale: bool) -> bool:
+        if cache.refreshed_at is None:
+            return False
+        return cache.refreshed_at > stale_before or not refresh_stale
+
+    def _store_exchange_cache(
+        self,
+        exchange: str,
+        records: tuple[CachedScriptMasterRecord, ...],
+        refreshed_at: datetime | None,
+    ) -> ScriptMasterExchangeCache:
+        exchange = _code(exchange)
+        cache = ScriptMasterExchangeCache(
+            exchange=exchange,
+            records=records,
+            refreshed_at=refreshed_at,
+            identity_index=_build_identity_index(records),
+        )
+        self._exchange_cache[exchange] = cache
+        return cache
+
+    @staticmethod
+    def _lookup_cached_records(
+        cache: ScriptMasterExchangeCache,
+        lookup: ScriptMasterLookup,
+    ) -> list[CachedScriptMasterRecord]:
+        exchange_values = {value for value in (_code(lookup.exchange), _code(lookup.segment)) if value}
+        identity_values = {value for value in (_symbol(lookup.symbol), _code(lookup.isin)) if value}
+        if not exchange_values or not identity_values:
+            return []
+        records_by_id: dict[int, CachedScriptMasterRecord] = {}
+        for exchange in exchange_values:
+            for identity in identity_values:
+                for record in cache.identity_index.get((exchange, identity), ()):
+                    records_by_id[id(record)] = record
+        return list(records_by_id.values())
 
     async def _cache_status(self, db: AsyncSession, exchange: str) -> tuple[int, datetime | None]:
         result = await db.execute(
@@ -566,6 +754,7 @@ def _candidate_payload(record: Any) -> dict[str, Any]:
         "strikePrice": str(_attr(record, "strike_price")) if _attr(record, "strike_price") is not None else None,
         "expiry": expiry.isoformat() if expiry else None,
         "lotSize": _attr(record, "lot_size"),
+        "tickSize": str(_attr(record, "tick_size")) if _attr(record, "tick_size") is not None else None,
         "isin": _attr(record, "isin"),
     }
 
@@ -584,12 +773,71 @@ def _row_to_db_values(row: NormalizedScriptMasterRow, refreshed_at: datetime) ->
         "strike_price": row.strike_price,
         "expiry_date": row.expiry_date,
         "lot_size": row.lot_size,
+        "tick_size": row.tick_size,
         "isin": row.isin,
         "raw_payload_json": row.raw_payload_json,
         "refreshed_at": refreshed_at,
         "created_at": refreshed_at,
         "updated_at": refreshed_at,
     }
+
+
+def _cached_record_from_values(values: dict[str, Any]) -> CachedScriptMasterRecord:
+    return CachedScriptMasterRecord(
+        id=values.get("id"),
+        exchange=_code(values.get("exchange")),
+        segment=_code(values.get("segment")) or None,
+        scrip_code=str(values.get("scrip_code")),
+        trading_symbol=_symbol(values.get("trading_symbol")) or "",
+        symbol_name=_symbol(values.get("symbol_name")),
+        underlying_symbol=_symbol(values.get("underlying_symbol")),
+        instrument_type=_code(values.get("instrument_type")) or None,
+        option_type=_option_type(values.get("option_type")),
+        strike_price=_decimal_or_none(values.get("strike_price")),
+        expiry_date=_date_or_none(values.get("expiry_date")),
+        lot_size=_int_or_none(values.get("lot_size")),
+        tick_size=_decimal_or_none(values.get("tick_size")),
+        isin=_code(values.get("isin")) or None,
+    )
+
+
+def _cached_record_from_model(row: ScriptMasterInstrument) -> CachedScriptMasterRecord:
+    return CachedScriptMasterRecord(
+        id=row.id,
+        exchange=_code(row.exchange),
+        segment=_code(row.segment) or None,
+        scrip_code=row.scrip_code,
+        trading_symbol=_symbol(row.trading_symbol) or "",
+        symbol_name=_symbol(row.symbol_name),
+        underlying_symbol=_symbol(row.underlying_symbol),
+        instrument_type=_code(row.instrument_type) or None,
+        option_type=_option_type(row.option_type),
+        strike_price=_decimal_or_none(row.strike_price),
+        expiry_date=_date_or_none(row.expiry_date),
+        lot_size=_int_or_none(row.lot_size),
+        tick_size=_decimal_or_none(row.tick_size),
+        isin=_code(row.isin) or None,
+    )
+
+
+def _build_identity_index(records: Sequence[CachedScriptMasterRecord]) -> dict[tuple[str, str], tuple[CachedScriptMasterRecord, ...]]:
+    indexed: dict[tuple[str, str], list[CachedScriptMasterRecord]] = {}
+    for record in records:
+        exchange_values = {value for value in (_code(record.exchange), _code(record.segment)) if value}
+        identity_values = {
+            value
+            for value in (
+                _symbol(record.trading_symbol),
+                _symbol(record.underlying_symbol),
+                _symbol(record.symbol_name),
+                _code(record.isin),
+            )
+            if value
+        }
+        for exchange in exchange_values:
+            for identity in identity_values:
+                indexed.setdefault((exchange, identity), []).append(record)
+    return {key: tuple(value) for key, value in indexed.items()}
 
 
 def _looks_like_instrument(row: dict[str, Any]) -> bool:

@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -9,7 +9,6 @@ from app.models import (
     AccountType,
     Broker,
     CopiedTradeOrderStatus,
-    CopyOrderStatus,
     CopySessionStatus,
     PriceMode,
     SizingMode,
@@ -167,6 +166,46 @@ class SharekhanWsSubscription(BaseModel):
         return value.strip().upper()
 
 
+class ScriptMasterInstrumentRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID | None = None
+    exchange: str
+    segment: str | None
+    scrip_code: str
+    trading_symbol: str
+    symbol_name: str | None
+    underlying_symbol: str | None
+    instrument_type: str | None
+    option_type: str | None
+    strike_price: Decimal | None
+    expiry_date: date | None
+    lot_size: int | None
+    tick_size: Decimal | None
+    isin: str | None
+    raw_payload_json: dict[str, Any]
+    refreshed_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class ScriptMasterSearchResult(ScriptMasterInstrumentRead):
+    is_watchlisted: bool = False
+    watchlist_id: uuid.UUID | None = None
+
+
+class ScriptMasterWatchlistCreate(BaseModel):
+    account_id: uuid.UUID
+    instrument_id: uuid.UUID
+
+
+class ScriptMasterWatchlistRead(BaseModel):
+    id: uuid.UUID
+    account_id: uuid.UUID
+    instrument: ScriptMasterInstrumentRead
+    created_at: datetime
+
+
 class CopyGroupCreate(BaseModel):
     name: str = Field(min_length=1, max_length=160)
     description: str | None = Field(default=None, max_length=1000)
@@ -209,6 +248,7 @@ class CopyGroupAccountRead(BaseModel):
     account_type: AccountType
     customer_id: str | None
     login_id: str | None
+    has_access_token: bool
     is_active: bool
 
 
@@ -222,7 +262,10 @@ class CopyGroupMemberSettingRead(BaseModel):
     multiplier: Decimal
     fixed_qty: int | None
     capital_percent: Decimal | None
+    min_qty: int | None
     max_qty: int | None
+    max_trades_per_day: int | None
+    max_daily_loss: Decimal | None
     max_order_value: Decimal | None
     allowed_symbols: list[str]
     blocked_symbols: list[str]
@@ -268,9 +311,68 @@ class CopyGroupValidationRead(BaseModel):
     copy_account_count: int = 0
 
 
+class CopySettingInput(BaseModel):
+    sizing_mode: SizingMode | None = None
+    multiplier: Decimal | None = Field(default=None, gt=0)
+    fixed_qty: int | None = Field(default=None, ge=1)
+    capital_percent: Decimal | None = Field(default=None, gt=0, le=100)
+    min_qty: int | None = Field(default=None, ge=1)
+    max_qty: int | None = Field(default=None, ge=1)
+    max_trades_per_day: int | None = Field(default=None, ge=1)
+    max_daily_loss: Decimal | None = Field(default=None, gt=0)
+    max_order_value: Decimal | None = Field(default=None, gt=0)
+    allowed_symbols: list[str] | None = None
+    blocked_symbols: list[str] | None = None
+    allowed_transaction_types: list[str] | None = None
+    allowed_product_types: list[str] | None = None
+    product_type_map: dict[str, str] | None = None
+    price_mode: PriceMode | None = None
+    max_slippage_percent: Decimal | None = Field(default=None, ge=0)
+    is_auto_squareoff_enabled: bool | None = None
+    is_enabled: bool | None = None
+
+    @field_validator("allowed_symbols", "blocked_symbols", "allowed_transaction_types", "allowed_product_types")
+    @classmethod
+    def normalize_string_lists(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        return [item for item in dict.fromkeys(str(entry).strip().upper() for entry in value) if item]
+
+    @field_validator("product_type_map")
+    @classmethod
+    def normalize_product_type_map(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        if value is None:
+            return None
+        normalized: dict[str, str] = {}
+        for key, mapped_value in value.items():
+            source = str(key).strip().upper()
+            target = str(mapped_value).strip().upper()
+            if source and target:
+                normalized[source] = target
+        return normalized
+
+    @model_validator(mode="after")
+    def validate_copy_setting(self) -> "CopySettingInput":
+        if self.sizing_mode == SizingMode.FIXED_QTY and self.fixed_qty is None:
+            raise ValueError("fixed_qty is required when sizing_mode is FIXED_QTY")
+        if self.min_qty is not None and self.max_qty is not None and self.min_qty > self.max_qty:
+            raise ValueError("min_qty cannot be greater than max_qty")
+        if self.allowed_transaction_types:
+            invalid = sorted(set(self.allowed_transaction_types) - {"B", "S"})
+            if invalid:
+                raise ValueError(f"allowed_transaction_types can only contain B or S: {', '.join(invalid)}")
+        return self
+
+
 class CopyGroupMemberCreate(BaseModel):
     copy_account_id: uuid.UUID
     is_enabled: bool = True
+    copy_setting: CopySettingInput | None = None
+
+
+class CopyGroupMemberUpdate(BaseModel):
+    is_enabled: bool | None = None
+    copy_setting: CopySettingInput | None = None
 
 
 class CopyGroupMemberRead(BaseModel):
@@ -283,23 +385,8 @@ class CopyGroupMemberRead(BaseModel):
     created_at: datetime
 
 
-class CopySettingPatch(BaseModel):
+class CopySettingPatch(CopySettingInput):
     copy_group_id: uuid.UUID | None = None
-    sizing_mode: SizingMode | None = None
-    multiplier: Decimal | None = None
-    fixed_qty: int | None = Field(default=None, ge=1)
-    capital_percent: Decimal | None = Field(default=None, gt=0, le=100)
-    max_qty: int | None = Field(default=None, ge=1)
-    max_order_value: Decimal | None = Field(default=None, gt=0)
-    allowed_symbols: list[str] | None = None
-    blocked_symbols: list[str] | None = None
-    allowed_transaction_types: list[str] | None = None
-    allowed_product_types: list[str] | None = None
-    product_type_map: dict[str, str] | None = None
-    price_mode: PriceMode | None = None
-    max_slippage_percent: Decimal | None = Field(default=None, ge=0)
-    is_auto_squareoff_enabled: bool | None = None
-    is_enabled: bool | None = None
 
 
 class CopySettingRead(BaseModel):
@@ -312,7 +399,10 @@ class CopySettingRead(BaseModel):
     multiplier: Decimal
     fixed_qty: int | None
     capital_percent: Decimal | None
+    min_qty: int | None
     max_qty: int | None
+    max_trades_per_day: int | None
+    max_daily_loss: Decimal | None
     max_order_value: Decimal | None
     allowed_symbols: list[str]
     blocked_symbols: list[str]
@@ -323,43 +413,6 @@ class CopySettingRead(BaseModel):
     max_slippage_percent: Decimal | None
     is_auto_squareoff_enabled: bool
     is_enabled: bool
-
-
-class MasterOrderRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: uuid.UUID
-    broker_order_id: str
-    master_account_id: uuid.UUID
-    exchange: str
-    scrip_code: str
-    trading_symbol: str
-    transaction_type: str
-    quantity: int
-    price: Decimal
-    trigger_price: Decimal | None
-    order_type: str
-    product_type: str
-    request_type: str
-    status: str
-    created_at: datetime
-
-
-class CopyOrderRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: uuid.UUID
-    master_order_id: uuid.UUID
-    copy_account_id: uuid.UUID
-    broker_order_id: str | None
-    status: CopyOrderStatus
-    calculated_quantity: int
-    calculated_price: Decimal
-    error_message: str | None
-    retry_count: int
-    idempotency_key: str
-    created_at: datetime
-    updated_at: datetime
 
 
 class CopySessionStart(BaseModel):
@@ -532,9 +585,6 @@ class SharekhanOrderPayload(BaseModel):
 
 
 class DashboardMetrics(BaseModel):
-    master_orders_today: int
-    successful_copied_orders: int
-    failed_copy_orders: int
     active_copy_accounts: int
     open_positions: int
     total_pnl: Decimal

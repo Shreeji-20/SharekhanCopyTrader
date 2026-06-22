@@ -15,12 +15,15 @@ from app.schemas import (
     CopyGroupMemberDetailRead,
     CopyGroupMemberRead,
     CopyGroupMemberSettingRead,
+    CopyGroupMemberUpdate,
+    CopySettingInput,
     CopyGroupRead,
     CopyGroupUpdate,
     CopyGroupValidationRead,
     CopyGroupValidationRequest,
     DuplicateCopyAccountWarning,
 )
+from app.services.live_copy import live_copy_manager
 
 router = APIRouter(prefix="/copy-groups", tags=["copy-groups"])
 
@@ -51,7 +54,42 @@ def _account_summary(account: BrokerAccount) -> CopyGroupAccountRead:
         account_type=account.account_type,
         customer_id=account.customer_id,
         login_id=account.login_id,
+        has_access_token=bool(account.access_token),
         is_active=account.is_active,
+    )
+
+
+def _apply_copy_setting_payload(setting: CopySetting, payload: CopySettingInput) -> list[str]:
+    data = payload.model_dump(exclude_unset=True)
+    for field, value in data.items():
+        setattr(setting, field, value)
+    return sorted(data.keys())
+
+
+async def _member_detail(db: DbSession, member_id: uuid.UUID) -> CopyGroupMemberDetailRead:
+    row = (
+        await db.execute(
+            select(CopyGroupMember, BrokerAccount, CopySetting)
+            .join(BrokerAccount, BrokerAccount.id == CopyGroupMember.copy_account_id)
+            .outerjoin(
+                CopySetting,
+                (CopySetting.copy_group_id == CopyGroupMember.copy_group_id)
+                & (CopySetting.copy_account_id == CopyGroupMember.copy_account_id),
+            )
+            .where(CopyGroupMember.id == member_id)
+        )
+    ).one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
+    member, copy_account, setting = row
+    return CopyGroupMemberDetailRead(
+        id=member.id,
+        copy_group_id=member.copy_group_id,
+        copy_account_id=member.copy_account_id,
+        copy_account=_account_summary(copy_account),
+        copy_setting=CopyGroupMemberSettingRead.model_validate(setting) if setting else None,
+        is_enabled=member.is_enabled,
+        created_at=member.created_at,
     )
 
 
@@ -272,8 +310,11 @@ async def add_member(
     if existing:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Copy account already in group")
     member = CopyGroupMember(copy_group_id=group.id, copy_account_id=copy_account.id, is_enabled=payload.is_enabled)
+    setting = CopySetting(copy_group_id=group.id, copy_account_id=copy_account.id)
+    if payload.copy_setting:
+        _apply_copy_setting_payload(setting, payload.copy_setting)
     db.add(member)
-    db.add(CopySetting(copy_group_id=group.id, copy_account_id=copy_account.id))
+    db.add(setting)
     await db.flush()
     await add_audit_log(
         db,
@@ -284,8 +325,55 @@ async def add_member(
         metadata={"copy_group_id": str(group.id), "copy_account_id": str(copy_account.id)},
     )
     await db.commit()
+    live_copy_manager.invalidate_master_targets(group.master_account_id)
     await db.refresh(member)
     return member
+
+
+@router.patch("/{group_id}/members/{member_id}", response_model=CopyGroupMemberDetailRead)
+async def update_member(
+    group_id: uuid.UUID,
+    member_id: uuid.UUID,
+    payload: CopyGroupMemberUpdate,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> CopyGroupMemberDetailRead:
+    group = await _group_for_user(db, group_id, current_user)
+    member = await db.get(CopyGroupMember, member_id)
+    if not member or member.copy_group_id != group_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
+    changed_fields: list[str] = []
+    if payload.is_enabled is not None:
+        member.is_enabled = payload.is_enabled
+        changed_fields.append("is_enabled")
+    setting_fields: list[str] = []
+    if payload.copy_setting:
+        setting = await db.scalar(
+            select(CopySetting).where(
+                CopySetting.copy_group_id == group.id,
+                CopySetting.copy_account_id == member.copy_account_id,
+            )
+        )
+        if setting is None:
+            setting = CopySetting(copy_group_id=group.id, copy_account_id=member.copy_account_id)
+            db.add(setting)
+        setting_fields = _apply_copy_setting_payload(setting, payload.copy_setting)
+    await add_audit_log(
+        db,
+        action="copy_group.member_update",
+        entity_type="copy_group_member",
+        entity_id=member.id,
+        user_id=current_user.id,
+        metadata={
+            "copy_group_id": str(group.id),
+            "copy_account_id": str(member.copy_account_id),
+            "member_fields": changed_fields,
+            "copy_setting_fields": setting_fields,
+        },
+    )
+    await db.commit()
+    live_copy_manager.invalidate_master_targets(group.master_account_id)
+    return await _member_detail(db, member_id)
 
 
 @router.delete("/{group_id}/members/{member_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -295,10 +383,18 @@ async def remove_member(
     db: DbSession,
     current_user: CurrentUser,
 ) -> None:
-    await _group_for_user(db, group_id, current_user)
+    group = await _group_for_user(db, group_id, current_user)
     member = await db.get(CopyGroupMember, member_id)
     if not member or member.copy_group_id != group_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
+    setting = await db.scalar(
+        select(CopySetting).where(
+            CopySetting.copy_group_id == group_id,
+            CopySetting.copy_account_id == member.copy_account_id,
+        )
+    )
+    if setting:
+        await db.delete(setting)
     await db.delete(member)
     await add_audit_log(
         db,
@@ -308,3 +404,4 @@ async def remove_member(
         user_id=current_user.id,
     )
     await db.commit()
+    live_copy_manager.invalidate_master_targets(group.master_account_id)

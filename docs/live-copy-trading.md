@@ -152,7 +152,7 @@ Resolution flow:
 Master WebSocket ack
 -> normalize event
 -> use event.scripCode if present
--> otherwise load/refresh Script Master cache for the event exchange
+-> otherwise use cached Script Master rows for the event exchange
 -> match the instrument
 -> inject resolved scripCode into the normalized event
 -> build child order payloads
@@ -163,8 +163,18 @@ Cache behavior:
 - Script Master rows are stored in PostgreSQL table `script_master_instruments`.
 - The cache is exchange scoped, for example `NC` or `NF`.
 - The default cache TTL is 24 hours through `SCRIPT_MASTER_CACHE_TTL_HOURS=24`.
-- Live copy refreshes an exchange only when the cache is empty or stale; it does not fetch Script Master on every WebSocket event.
+- The API also keeps an in-process per-exchange memory cache of normalized Script Master rows and lookup indexes.
+- After a successful Sharekhan login or manual token exchange, the API schedules a Script Master preload for the exchanges returned by the broker profile plus `SCRIPT_MASTER_PRELOAD_EXCHANGES`.
+- Login preload uses the same TTL rules as normal cache loading: fresh PostgreSQL rows are loaded into memory, while stale or empty exchanges are refreshed through broker-router and then written to PostgreSQL plus memory.
+- Script Master refresh is coalesced per exchange inside each API process. If 10 accounts log in at the same time and all ask to warm `NC`, the first task performs the TTL/`refreshed_at` check and broker download; the waiting tasks reuse the updated in-memory cache instead of downloading the same exchange again.
+- Empty refresh attempts are also remembered in memory for the TTL window, so a temporary empty Script Master response returns `CACHE_EMPTY` without repeatedly calling Sharekhan on every login or live lookup.
+- If an API process starts without a recent login preload, the first missing-`scripCode` lookup for an exchange loads that exchange from PostgreSQL once and stores it in memory.
+- Subsequent lookups for the same exchange resolve against memory instead of running Postgres status/lookup queries.
+- The in-memory cache has an identity dictionary keyed by exchange/segment plus trading symbol, underlying symbol, symbol name, and ISIN. Normal live-copy lookup is an O(1) dictionary hit to get the candidate set, followed by safety validation for expiry, strike, CE/PE, lot size, and ambiguity.
+- Live copy uses stale-but-present exchange cache rows during WebSocket event handling so a Script Master refresh does not delay copying.
+- If the exchange cache is empty, live copy may fetch it through the master account; operators should manually refresh active exchanges before live market use.
 - Manual refresh is available through `POST /script-master/{exchange}/refresh?account_id={account_id}`.
+- The memory cache is per API process. In multi-instance deployments each API instance has its own cache, and Script Master refresh invalidates/replaces only the cache in the instance that handled the refresh request.
 
 Matching rules:
 
@@ -182,6 +192,37 @@ Safety rules:
 - The engine never places an order from an ambiguous Script Master match.
 
 The master event `raw_payload_json` stores `script_master_resolution` with the resolution status, message, candidate snapshots, and whether a cache refresh happened.
+
+## Live Copy Latency
+
+The WebSocket copy path is instrumented with structured logs and stored timing data in `master_trade_events.raw_payload_json.live_copy_timing_ms`.
+
+Recorded timings include:
+
+| Timing | Meaning |
+| --- | --- |
+| `parse_ms` | Time spent parsing the Redis/WebSocket payload into a normalized trade event. |
+| `duplicate_lookup_ms` | Session-scoped duplicate-event lookup. |
+| `scrip_code_resolution_ms` | Script Master lookup/enrichment time when `scripCode` is missing. |
+| `target_load_ms` | Active copy group/member/account/settings load time. |
+| `target_cache_hit` | `1` when live copy used the in-memory active-target cache, `0` when it reloaded from PostgreSQL. |
+| `risk_lookup_ms` | Bulk lookup for per-group/account trade counts and account loss guard data. |
+| `order_dispatch_ms` | Time spent preparing eligible child payloads and dispatching broker order calls. |
+| `copier_target_count` | Number of deduped eligible target memberships considered. |
+| `prepared_order_count` | Number of copier orders that passed risk/credential/dry-run checks and were sent to broker-router. |
+| `max_dispatch_gap_ms` | Largest gap between copier order dispatch start offsets inside the batch. This should be near-zero unless dispatch throttling is configured. |
+| `total_master_to_copier_ms` | End-to-end time from WebSocket message receipt to copied-order rows being ready for commit. |
+
+Target loading behavior:
+
+- Active selected copy groups, members, copy accounts, and `copy_settings` are cached per session for 15 seconds.
+- Session start/resume preloads the target cache.
+- Member/settings/group mutations invalidate cached targets for the affected master account.
+- Live copy prepares and validates all copier payloads first, then dispatches only the prepared broker order calls.
+- Copier placements are dispatched concurrently with `asyncio.gather(..., return_exceptions=True)`, so one slow or failed copy account does not delay dispatch start for other accounts.
+- A shared broker-router HTTP client is used for each batch, avoiding per-copier API client setup.
+- `LIVE_COPY_ORDER_DISPATCH_CONCURRENCY=0` means unlimited concurrent dispatch. Set it to a positive number only when broker/API throttling is required; this intentionally spaces dispatch starts and is logged as `broker_throttle_active=true`.
+- If the same copy account appears in multiple selected groups, the existing safety dedupe keeps the first group by group creation order and logs `live_copy.duplicate_copier_skipped`.
 
 ## Child Order Payload
 
@@ -215,7 +256,11 @@ The engine skips the child order when:
 - Copy settings are disabled.
 - Symbol, transaction type, or product type is blocked by settings.
 - Calculated quantity is zero.
+- Calculated quantity is below `min_qty`.
+- Calculated quantity exceeds `max_qty`.
 - Calculated order value exceeds `max_order_value`.
+- `max_trades_per_day` has already been reached for that copy account in that group.
+- `max_daily_loss` has already been reached for that copy account based on stored positions PnL.
 - The master WebSocket event does not include `scripCode` and Script Master resolution fails.
 - Multiple Script Master rows match the same event, so placing the order would be ambiguous.
 
@@ -279,7 +324,7 @@ Screens:
 | Route | Purpose |
 | --- | --- |
 | `/copy-groups` | Create, enable/disable, delete, and open copy groups. |
-| `/copy-groups/{id}` | Manage group members and view preflight warnings. |
+| `/copy-groups/{id}` | Manage group members, edit per-member risk/copy settings, and view preflight warnings. |
 | `/live-copy` | Start dry-run/live sessions, pause/resume/stop, and inspect events/copied order attempts. |
 
 The `/live-copy` Stream Status panel shows connection/module/ack state, message counts, the most recent sent payload, recent sent frames, and recent received frames. This panel is the first place to confirm that the outbound order-streaming `ack` request was sent after module readiness.

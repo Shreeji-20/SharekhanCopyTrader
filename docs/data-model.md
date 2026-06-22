@@ -24,7 +24,7 @@ erDiagram
     copy_groups ||--o{ copy_group_members : contains
     broker_accounts ||--o{ copy_group_members : "copy account"
     copy_groups ||--o{ copy_settings : configures
-    broker_accounts ||--o| copy_settings : "copy account"
+    broker_accounts ||--o{ copy_settings : "copy account"
     broker_accounts ||--o{ master_orders : "master account"
     master_orders ||--o{ copy_orders : produces
     broker_accounts ||--o{ copy_sessions : "live master"
@@ -33,6 +33,8 @@ erDiagram
     copy_groups ||--o{ copied_trade_orders : "copy group"
     broker_accounts ||--o{ copied_trade_orders : "copy account"
     script_master_instruments ||--o{ master_trade_events : "resolves missing scripCode"
+    users ||--o{ script_master_watchlist_items : owns
+    broker_accounts ||--o{ script_master_watchlist_items : scopes
     broker_accounts ||--o{ copy_orders : "copy account"
     broker_accounts ||--o{ positions : has
     broker_accounts ||--o{ holdings : has
@@ -111,9 +113,12 @@ Defines per-copy-account settings within a copy group.
 | `sizing_mode` | Quantity calculation mode. |
 | `multiplier` | Multiplier for `MULTIPLIER` mode. |
 | `fixed_qty` | Fixed quantity for `FIXED_QTY` mode. |
-| `capital_percent` | Percent allocation for `PERCENT_CAPITAL` mode. |
-| `max_qty` | Optional hard quantity cap. |
-| `max_order_value` | Optional hard notional value cap. |
+| `capital_percent` | Percent allocation for `PERCENT_CAPITAL` mode. Current live-copy WebSocket execution still skips percent-capital sizing until account capital sync is implemented for that path. |
+| `min_qty` | Optional lower quantity bound. If the calculated copy quantity is below this value, the child order is skipped. |
+| `max_qty` | Optional upper quantity bound. If the calculated copy quantity exceeds this value, the child order is skipped instead of silently reducing quantity. |
+| `max_trades_per_day` | Optional per `copy_group_id + copy_account_id` placed-order count limit. |
+| `max_daily_loss` | Optional account-level loss guard. The live-copy engine reads the latest stored `positions.pnl` sum and skips when the loss threshold has been reached. |
+| `max_order_value` | Optional hard notional value cap. If `price * quantity` exceeds this value, the child order is skipped. |
 | `allowed_symbols`, `blocked_symbols` | Symbol allow/block lists. |
 | `allowed_transaction_types` | Side filters, default `["B", "S"]`. |
 | `allowed_product_types` | Product filter list. Empty means no product restriction. |
@@ -121,7 +126,9 @@ Defines per-copy-account settings within a copy group.
 | `price_mode` | Price transformation mode. |
 | `max_slippage_percent` | Slippage percentage for `LIMIT_WITH_SLIPPAGE`. |
 | `is_auto_squareoff_enabled` | Stored setting for square-off behavior. Current worker does not act on this flag. |
-| `is_enabled` | Copy setting enabled flag used by worker risk validation. |
+| `is_enabled` | Copy setting enabled flag used by live-copy and worker risk validation. |
+
+Every `copy_settings` row is scoped by the unique `(copy_account_id, copy_group_id)` pair. The same copy account can therefore have different sizing, symbols, product filters, and limits in different groups. Member deletion also removes the matching setting row.
 
 ### `master_orders`
 
@@ -231,6 +238,7 @@ Stores normalized Sharekhan Scrip Master rows for fast, safe symbol resolution d
 | `strike_price` | Optional derivative strike price. |
 | `expiry_date` | Optional derivative expiry date. |
 | `lot_size` | Optional market lot size. |
+| `tick_size` | Optional minimum price increment normalized from the provider row. |
 | `isin` | Optional ISIN used to refine equity matching. |
 | `raw_payload_json` | Original master row for diagnostics. |
 | `refreshed_at` | Timestamp of the cache refresh that wrote the row. |
@@ -241,6 +249,30 @@ Constraints and indexes:
 - Lookup indexes on `(exchange, trading_symbol)`, `(exchange, segment, trading_symbol)`, derivative fields, `underlying_symbol`, and `isin`.
 
 The live copy flow uses this table only when a master WebSocket order acknowledgement is missing `scripCode`. If the cache is empty or older than `SCRIPT_MASTER_CACHE_TTL_HOURS`, the API refreshes the relevant exchange through broker-router before matching. If multiple different `scrip_code` values match, the copy order is skipped rather than placed blindly.
+
+The Script Master search page also reads this table directly. Cache rows are exchange scoped and shared; account ownership is enforced on the selected account and on saved watchlist rows.
+
+### `script_master_watchlist_items`
+
+Stores durable Script Master selections for an authenticated user and broker account.
+
+| Column | Purpose |
+| --- | --- |
+| `id` | UUID watchlist item identifier. |
+| `user_id` | Application user who owns the item. Cascades on user deletion. |
+| `account_id` | Broker account whose watchlist contains the instrument. Cascades on account deletion. |
+| `exchange` | Stable exchange part of the instrument natural key. |
+| `scrip_code` | Stable token part of the instrument natural key. |
+| `instrument_snapshot_json` | Normalized instrument snapshot used when the refreshed cache row is temporarily unavailable. |
+| `created_at` | Watchlist insertion time. |
+
+Constraints and indexes:
+
+- Unique `(user_id, account_id, exchange, scrip_code)` prevents duplicates per account.
+- Index `(user_id, account_id)` supports account watchlist reads.
+- Index `(exchange, scrip_code)` supports joining to the latest cache row.
+
+The table intentionally does not foreign-key a Script Master row UUID. Exchange refresh deletes and reinserts cache rows, so watchlists resolve current details by `(exchange, scrip_code)` and retain the saved snapshot as a fallback.
 
 ### `positions`
 
@@ -308,14 +340,14 @@ Stores normalized tick data, but the current broker-router publishes stream mess
 
 | Service | Tables read | Tables written |
 | --- | --- | --- |
-| Main API | All ORM tables relevant to endpoints | `users`, `broker_accounts`, `copy_groups`, `copy_group_members`, `copy_settings`, `script_master_instruments`, `audit_logs` |
+| Main API | All ORM tables relevant to endpoints | `users`, `broker_accounts`, `copy_groups`, `copy_group_members`, `copy_settings`, `script_master_instruments`, `script_master_watchlist_items`, `audit_logs` |
 | Broker-router | Partial `broker_accounts` | `broker_accounts.access_token`, `refresh_token`, `token_expires_at`, `last_connected_at`, `customer_id`, `login_id` |
 | Worker | Partial `copy_orders` | `copy_orders` |
 | Web | None directly | None directly |
 
 ## Migration Notes
 
-The initial migration creates all enums and tables. Later migrations add account-scoped proxy fields, make Sharekhan identity fields nullable so accounts can be created with only API Key and Secure Key, add encrypted raw request-token storage, add live-copy trading tables, and add the Script Master cache table. To apply all migrations:
+The initial migration creates all enums and tables. Later migrations add account-scoped proxy fields, make Sharekhan identity fields nullable so accounts can be created with only API Key and Secure Key, add encrypted raw request-token storage, add live-copy trading tables, add the Script Master cache table, add copy-setting risk limits, and add Script Master tick size plus account watchlists in `0010_script_master_watchlist`. To apply all migrations:
 
 ```bash
 docker compose exec api alembic upgrade head

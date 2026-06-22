@@ -68,12 +68,18 @@ Create broker accounts from the Accounts page or `POST /accounts`. Store the Sha
 3. Open the Sharekhan login from the Accounts page row action, or use the central Login button for selected/all accounts.
 4. The app generates the Sharekhan login URL with `POST /accounts/{id}/sharekhan/login-url`, including a random numeric `state` value for callback account matching.
 5. Configure the Sharekhan API callback URL as `http://localhost:3000/sharekhan/callback` locally, or `https://your-domain.com/sharekhan/callback` in production.
-6. After Sharekhan redirects back with `request_token`, the frontend calls `POST /accounts/sharekhan/callback`; the API saves the raw request token and immediately asks broker-router to exchange it for the Sharekhan access token/profile identity.
+6. After Sharekhan redirects back with `request_token`, the frontend calls `POST /accounts/sharekhan/callback`; the API saves the raw request token, immediately asks broker-router to exchange it for the Sharekhan access token/profile identity, then schedules Script Master warm-up for the configured exchanges.
 7. Open the account accordion in Accounts to view the stored/masked login details. Opening the accordion no longer calls Sharekhan's access-token endpoint again.
 8. Create a copy group and add enabled copy accounts.
 9. Configure sizing, symbol filters, transaction filters, product mapping, and max order limits in Risk Settings.
 
 If an account shows `CREDENTIALS_LOCKED`, the encrypted fields were stored under a different `APP_SECRET_KEY` or are unreadable. Edit the account, enter the API Key and Secure Key again, and re-enter or clear optional vendor/proxy details.
+
+## Script Master Search And Watchlist
+
+After Script Master warm-up or manual refresh has populated the normalized cache, open `http://localhost:3000/script-master` to search by script name, symbol/token, underlying, or ISIN. Select an account, search for a value such as `idea`, add instruments to that account's watchlist, and remove them from the Watch List tab.
+
+Watchlists are isolated by authenticated user and broker account. Duplicate `(user, account, exchange, scrip_code)` entries are prevented in PostgreSQL, and saved snapshots keep watchlist rows readable when an exchange cache is refreshed. See [`docs/script-master-search-and-watchlist.md`](docs/script-master-search-and-watchlist.md) for the API and operating details.
 
 ## Running the Worker
 

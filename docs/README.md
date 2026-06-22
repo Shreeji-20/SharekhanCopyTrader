@@ -21,6 +21,7 @@ Account login is available from each account accordion item and from a central s
 | [Sharekhan API Postman Study](sharekhan-api-postman.md) | Postman-derived Sharekhan REST endpoint map, request-token encryption flow, variables, and integration notes. |
 | [UI Specification](ui-spec.md) | Portable UI/design-system contract for recreating this app's shadcn/zinc/Poppins interface in another project. |
 | [Live Copy Trading](live-copy-trading.md) | Sharekhan WebSocket ack ingestion, dry-run session controls, copied-order persistence, and smoke test flow. |
+| [Script Master Search And Watchlist](script-master-search-and-watchlist.md) | Script Master search, account-scoped watchlists, API contracts, durable snapshots, UI workflow, and verification. |
 | [Copy Worker](copy-worker.md) | Redis job shape, risk engine, sizing rules, retry/idempotency behavior, and persistence. |
 | [Frontend](frontend.md) | Next.js app structure, routes, data sources, UI components, and current integration status. |
 | [Configuration And Deployment](configuration-and-deployment.md) | Environment variables, Docker Compose, migrations, runtime commands, and production checklist. |
@@ -63,7 +64,7 @@ Several pieces are intentionally scaffolded or require an external producer:
 5. Let the API container run migrations automatically with `RUN_MIGRATIONS=true`, or run `docker compose exec api alembic upgrade head` manually.
 6. Register a user from the login screen's Create account mode, or with `POST /auth/register`.
 7. Add one `MASTER` account and at least one `COPY` account using each account's API Key and Secure Key.
-8. Configure the Sharekhan callback URL as `http://localhost:3000/sharekhan/callback`, open account login from the Accounts page, complete broker login, confirm access token status on the callback/accounts page, create copy groups, and configure copy settings.
+8. Configure the Sharekhan callback URL as `http://localhost:3000/sharekhan/callback`, open account login from the Accounts page, complete broker login, confirm access token status on the callback/accounts page, create copy groups, and configure each copy member's risk settings from the copy group detail page.
 9. Keep `COPY_TRADING_DRY_RUN=true` while testing `/live-copy`; only after controlled testing should `PAPER_TRADING_MODE=false` and `COPY_TRADING_DRY_RUN=false` be considered.
 
 ## High-Level Flow

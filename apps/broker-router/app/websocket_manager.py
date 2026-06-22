@@ -13,6 +13,7 @@ import websockets
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
+STREAM_DIAGNOSTIC_LIMIT = 1000
 
 
 @dataclass
@@ -112,12 +113,12 @@ class SharekhanStreamManager:
             "last_error": connection.last_error,
             "module_ack_payload": connection.module_ack_payload,
             "last_sent_payload": connection.last_sent_payload,
-            "sent_payloads": connection.sent_payloads[-10:],
+            "sent_payloads": list(connection.sent_payloads),
             "messages_received": connection.messages_received,
             "ack_messages_received": connection.ack_messages_received,
             "feed_messages_received": connection.feed_messages_received,
             "raw_messages_received": connection.raw_messages_received,
-            "recent_messages": connection.recent_messages[-10:],
+            "recent_messages": list(connection.recent_messages),
         }
 
     async def disconnect(self, account_id: uuid.UUID) -> dict[str, Any]:
@@ -207,7 +208,7 @@ class SharekhanStreamManager:
                 "payload": payload,
             }
         )
-        connection.sent_payloads = connection.sent_payloads[-20:]
+        connection.sent_payloads = connection.sent_payloads[-STREAM_DIAGNOSTIC_LIMIT:]
         logger.info(
             "Sharekhan websocket sent %s frame for account %s",
             payload.get("action", "raw"),
@@ -416,7 +417,7 @@ def _record_stream_message(connection: StreamConnection, payload: Any) -> str:
             "payload": payload,
         }
     )
-    connection.recent_messages = connection.recent_messages[-20:]
+    connection.recent_messages = connection.recent_messages[-STREAM_DIAGNOSTIC_LIMIT:]
     return message_type
 
 

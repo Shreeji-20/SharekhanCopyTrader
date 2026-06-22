@@ -6,7 +6,7 @@ This document covers how to verify the app and operate it safely.
 
 | Service | Test path | Coverage |
 | --- | --- | --- |
-| API | `apps/api/tests/test_security_and_schemas.py`, `apps/api/tests/test_live_copy.py` | Secret masking, encryption round trip, unreadable credential recovery response, stored Sharekhan profile display, proxy validation, Sharekhan order payload validation, live copy ack normalization, Script Master symbol matching, missing-`scripCode` live-copy enrichment, and child order payload building. |
+| API | `apps/api/tests/test_security_and_schemas.py`, `apps/api/tests/test_live_copy.py`, `apps/api/tests/test_script_master_watchlist.py` | Secret masking, encryption round trip, credential recovery, order validation, live copy ack normalization, Script Master parsing/matching, account authorization, duplicate watchlist behavior, snapshot fallback, and child order payload building. |
 | Broker-router | `apps/broker-router/tests/test_sharekhan_client.py` | Raw route URL construction, Sharekhan header/login URL construction, proxy composition, unreadable credential errors, raw request-token access payload, Sharekhan module subscription readiness parsing, connect-before-subscribe handling, and outbound order ack subscription payloads. |
 | Worker | `apps/worker/tests/test_risk_engine.py` | Quantity sizing, risk rejection, idempotency key stability, duplicate skip behavior, retry behavior. |
 
@@ -126,7 +126,7 @@ curl -X POST http://localhost:8000/accounts/$ACCOUNT_ID/sharekhan/login-url \
 
 10. Create a copy group and add the copy account.
 
-11. Patch copy settings with low `max_qty` and `max_order_value`.
+11. Open the copy group detail page and save group-member risk settings with low `max_qty` and `max_order_value`.
 
 12. If testing worker order execution, ensure a matching `master_orders` row exists before enqueueing a copy job.
 
@@ -145,6 +145,10 @@ Then check cache status:
 curl http://localhost:8000/script-master/NC/status \
   -H "Authorization: Bearer $TOKEN"
 ```
+
+15. Open `/script-master`, select the logged-in account, search for `idea`, add a result, switch to Watch List, and remove it. Confirm adding the same result twice does not create a duplicate.
+
+API-only watchlist smoke calls are documented in [Script Master Search And Watchlist](script-master-search-and-watchlist.md).
 
 ## Worker Smoke Test Notes
 
@@ -220,7 +224,9 @@ The script validates selected groups, starts a dry-run session, checks event/ord
 - Opening an account accordion displays stored masked Sharekhan details without calling the access-token endpoint again.
 - Data tables render live API rows or empty states without demo data.
 - Copy Groups page creates groups and manages members.
+- Copy Group Detail edits risk settings per copy account inside each copy group.
 - Live Copy page starts dry-run sessions, pauses/resumes/stops/deletes sessions, displays master events plus copied order attempts, and shows stream diagnostics with recent sent/received WebSocket frames.
+- Script Master page searches normalized instruments, shows all normalized/raw fields, and keeps watchlists isolated by user and selected account.
 - Missing `scripCode` events are enriched through Script Master when a unique match exists. The master event raw payload includes `script_master_resolution`.
 
 ## Troubleshooting
@@ -241,7 +247,15 @@ The script validates selected groups, starts a dry-run session, checks event/ord
 | Ack subscribe stays pending | Missing `customer_id`, modules not ready, or an older socket was reused before ack was sent | Confirm `Customer: true`, `Modules: READY`, then inspect Stream Status `sent_payloads` for `{"action":"ack","key":[""],"value":["CUSTOMER_ID"]}`. Reconnect/start a fresh session if absent. |
 | Live copy skips with `scripCode missing and could not be resolved` | WebSocket ack omitted `scripCode` and no unique Script Master row matched | Refresh `/script-master/{exchange}/refresh`, inspect `script_master_resolution` in the master event raw payload, and verify symbol/exchange/expiry/strike/option fields are present. |
 | Live copy skips with `multiple Script Master matches found` | More than one Script Master row matched the event | Do not force placement. Refine incoming event fields or copy settings; inspect the candidate snapshots stored in `script_master_resolution.candidates`. |
-| Script Master cache is empty | Master endpoint returned no parseable rows or refresh has not run | Call the refresh endpoint with a logged-in account and check API logs for `script_master.fetch_started`, `script_master.fetch_completed`, or `script_master.fetch_empty`. |
+| Live copy skips with `Calculated quantity is below min_qty` or `Calculated quantity exceeds max_qty` | Group-member risk limits rejected the calculated child quantity | Open `/copy-groups/{id}` and adjust that member's min/max quantity or sizing mode. |
+| Live copy skips with `max_trades_per_day` | The copy account has already reached the group-scoped placed-order count for the UTC day | Inspect `copied_trade_orders` for that `copy_group_id` and `copier_account_id`; raise or clear the limit if intended. |
+| Live copy skips with `max_daily_loss` | Stored positions PnL shows the account-level loss threshold has been reached | Sync/check positions before changing the limit. |
+| Live copy takes several seconds after a WebSocket ack | Script Master cache miss, target cache miss, DB/risk lookup, configured dispatch throttle, or slow broker order placement | Inspect `master_trade_events.raw_payload_json.live_copy_timing_ms` and API logs `live_copy.batch_prepared`, `live_copy.dispatch_started`, `live_copy.dispatch_completed`, `live_copy.copier_order_started`, and `live_copy.copier_order_finished`. Check `max_dispatch_gap_ms` and `LIVE_COPY_ORDER_DISPATCH_CONCURRENCY`. |
+| Script Master cache is empty | Login preload did not run, master endpoint returned no parseable rows, or refresh has not run | Complete Sharekhan login with `SCRIPT_MASTER_PRELOAD_ON_LOGIN=true`, or call the refresh endpoint with a logged-in account. Check API logs for `script_master.login_preload_started`, `script_master.fetch_started`, `script_master.fetch_completed`, or `script_master.fetch_empty`. |
+| Script Master search returns no rows | Search has fewer than two characters, cache is empty, or the instrument uses a different symbol/name | Enter at least two characters, check `/script-master/{exchange}/status`, refresh the exchange, and inspect the raw master row fields. |
+| Script Master watchlist is empty for another account | Watchlists are account specific | Select the account used when the instrument was added, or add it separately for the current account. |
+| Script Master watchlist migration errors | `0010_script_master_watchlist` has not been applied | Run `docker compose exec api alembic upgrade head` and restart the API. |
+| Script Master lookup is still slow after first event | API process had no in-memory exchange cache yet, was restarted, or refresh happened on another API instance | Watch for `script_master.memory_cache_loaded` on first lookup and `script_master.memory_cache_hit` afterward. Refresh is per API process. |
 | Paper order unexpectedly live | `PAPER_TRADING_MODE=false` in broker-router environment | Check `/health` on broker-router. |
 | Live copy order unexpectedly live | `COPY_TRADING_DRY_RUN=false`, `PAPER_TRADING_MODE=false`, and session `dry_run=false` | Re-enable safety flags and stop the session from `/live-copy`. |
 | Worker inserts fail | Missing master order foreign key | Ensure `master_orders.id` exists before job. |
@@ -280,6 +294,11 @@ limit 20;
 
 select status, child_order_id, error_message, created_at
 from copied_trade_orders
+order by created_at desc
+limit 20;
+
+select symbol, copied_status, raw_payload_json->'live_copy_timing_ms' as timings, created_at
+from master_trade_events
 order by created_at desc
 limit 20;
 ```

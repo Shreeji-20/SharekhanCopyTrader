@@ -25,7 +25,7 @@ The main API lives in `apps/api`. It is a FastAPI service that exposes the user-
 | `app/encryption.py` | AES-GCM encryption/decryption for credentials and tokens. |
 | `app/audit.py` | Audit log helper. |
 | `app/services/broker_router.py` | Internal HTTP client for broker-router login URL and token exchange. |
-| `app/services/script_master.py` | Script Master normalization, database refresh, and missing-`scripCode` resolution for live copy. |
+| `app/services/script_master.py` | Script Master normalization, database refresh, search data preparation, tick-size parsing, and missing-`scripCode` resolution for live copy. |
 
 ## Authentication
 
@@ -134,22 +134,42 @@ Sharekhan credential note:
 - Customer ID and channel user are not required during account creation. Broker-router stores them from Sharekhan's access-token response when present.
 - Normal browser login uses `POST /accounts/{account_id}/sharekhan/login-url` followed by Sharekhan redirecting to `/sharekhan/callback`, which calls `POST /accounts/sharekhan/callback`.
 - The callback saves the raw `request_token`, immediately asks broker-router to decrypt it, build `FinalEncryptedToken`, send `{apiKey, requestToken, state, versionId}` to Sharekhan's access-token endpoint, and store the returned `data.token` plus profile fields.
+- After a successful token exchange, the API schedules Script Master warm-up for the exchanges returned by Sharekhan plus `SCRIPT_MASTER_PRELOAD_EXCHANGES`. Fresh PostgreSQL rows are loaded into the in-process index; stale or empty exchanges are refreshed through broker-router.
 - Opening the account accordion only displays stored/masked account details; it does not re-run the Sharekhan access-token exchange.
 
 ### Script Master
 
 | Method | Path | Description |
 | --- | --- | --- |
+| `GET` | `/script-master/search?query={text}&account_id={account_id}&limit={limit}` | Search normalized Script Master rows. With an account id, validates account access and returns account-specific added state. |
+| `POST` | `/script-master/watchlist` | Add `{account_id, instrument_id}` to the authenticated user's account-specific watchlist. Duplicate natural keys return the existing row. |
+| `GET` | `/script-master/watchlist?account_id={account_id}` | List the authenticated user's watchlist, optionally filtered to one owned account. |
+| `DELETE` | `/script-master/watchlist/{item_id}` | Remove a watchlist item owned by the authenticated user. |
 | `GET` | `/script-master/{exchange}/status` | Return cached row count and latest refresh timestamp for an exchange. |
 | `POST` | `/script-master/{exchange}/refresh?account_id={account_id}` | Fetch Sharekhan Scrip Master data through a logged-in account and replace the normalized PostgreSQL cache for that exchange. |
 
 Script Master cache details:
 
 - Data is stored in `script_master_instruments`.
+- Search is case-insensitive across trading symbol, symbol name, underlying, scrip code, and ISIN. Terms shorter than two characters return no results; the default limit is `50` and maximum is `100`.
+- Normalized rows include lot size and tick size. `raw_payload_json` preserves additional provider fields.
 - Refresh is exchange scoped and uses the existing broker-router `GET /sharekhan/master/{exchange}?account_id=...` path.
-- The live copy engine calls the refresh path internally only when the exchange cache is empty or older than `SCRIPT_MASTER_CACHE_TTL_HOURS`.
+- The API keeps a per-process in-memory cache keyed by exchange for live-copy symbol resolution.
+- Login warm-up loads normalized rows from PostgreSQL into memory immediately after account login. If an API process restarts before warm-up runs, the first lookup for an exchange still loads normalized rows from PostgreSQL once; subsequent lookups use the in-memory rows and indexes.
+- Concurrent login warm-ups are coalesced by exchange. Multiple accounts logging in together do not download the same exchange repeatedly; waiting tasks reuse the first task's fresh `refreshed_at` result and memory index.
+- The live copy engine uses cached Script Master rows on the WebSocket hot path. If an exchange cache has rows, those rows are used even when stale so order copying is not delayed by a refresh. If the exchange cache is empty, live copy may fetch it once through the selected master account.
 - The default TTL is `24` hours.
-- Manual refresh records `script_master.refresh` in audit logs.
+- Manual refresh records `script_master.refresh` in audit logs and replaces or invalidates that API process's in-memory exchange cache.
+- The memory cache is not shared across API instances; in multi-instance deployments, refresh each instance or restart/route refresh consistently if cache coherence is required.
+
+Watchlist details:
+
+- Rows are stored in `script_master_watchlist_items` and scoped by `user_id` plus `account_id`.
+- Unique `(user_id, account_id, exchange, scrip_code)` prevents duplicate instruments for the same account.
+- Watchlist rows store a JSON instrument snapshot because exchange refresh replaces Script Master cache row UUIDs.
+- Reads prefer the current cache row joined by `(exchange, scrip_code)` and fall back to the snapshot when no current row exists.
+- Add and remove operations emit `script_master.watchlist_add` and `script_master.watchlist_remove` audit events.
+- Full request/response behavior is documented in [Script Master Search And Watchlist](script-master-search-and-watchlist.md).
 
 Live-copy matching uses:
 
@@ -166,7 +186,8 @@ Live-copy matching uses:
 | `GET` | `/copy-groups/{group_id}` | Read a group. |
 | `PATCH` | `/copy-groups/{group_id}` | Update name, active flag, or master account. |
 | `DELETE` | `/copy-groups/{group_id}` | Delete a group. |
-| `POST` | `/copy-groups/{group_id}/members` | Add a `COPY` account to a group and create default copy settings. |
+| `POST` | `/copy-groups/{group_id}/members` | Add a `COPY` account to a group and create group-scoped copy settings. Body may include `copy_setting`. |
+| `PATCH` | `/copy-groups/{group_id}/members/{member_id}` | Enable/disable a member and update that member's group-scoped risk/copy settings. |
 | `DELETE` | `/copy-groups/{group_id}/members/{member_id}` | Remove a group member. |
 
 Validation:
@@ -174,37 +195,42 @@ Validation:
 - `master_account_id` must point to an account of type `MASTER`.
 - `copy_account_id` must point to an account of type `COPY`.
 - Duplicate copy account membership in the same group returns `409`.
+- Copy settings are stored per `(copy_group_id, copy_account_id)`; editing one group member does not change the same account in another group.
+
+Member risk/copy setting fields:
+
+| Field | Notes |
+| --- | --- |
+| `is_enabled` | Enables/disables the copy setting separately from the member enabled flag. |
+| `sizing_mode` | `SAME_QTY`, `MULTIPLIER`, `FIXED_QTY`, or `PERCENT_CAPITAL`. |
+| `multiplier`, `fixed_qty`, `capital_percent` | Sizing inputs. `fixed_qty` is required when `sizing_mode=FIXED_QTY`. |
+| `min_qty`, `max_qty` | Quantity bounds. Live copy skips when calculated quantity is outside the bounds. |
+| `max_trades_per_day` | Per group/account placed-order limit. |
+| `max_daily_loss` | Account loss guard based on stored positions PnL. |
+| `max_order_value` | Maximum notional value for a child order. |
+| `allowed_symbols`, `blocked_symbols` | Uppercased symbol filters. |
+| `allowed_transaction_types` | Side filter; only `B` and `S` are valid. |
+| `allowed_product_types`, `product_type_map` | Product allow-list and master-to-copy product mapping. |
+| `price_mode`, `max_slippage_percent` | Price transformation controls. |
+| `is_auto_squareoff_enabled` | Stored account/group setting for future square-off behavior. |
 
 ### Copy Settings
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/copy-settings/{copy_account_id}` | Read settings for a copy account, optionally filtered by `copy_group_id`. |
+| `GET` | `/copy-settings/{copy_account_id}` | Read settings for a copy account in a required `copy_group_id`. |
 | `PATCH` | `/copy-settings/{copy_account_id}` | Update or create settings for a copy account and group. |
 
 Query:
 
 | Parameter | Required | Notes |
 | --- | --- | --- |
-| `copy_group_id` | Optional for read, optional for patch if body includes `copy_group_id` | Used to select the group-specific setting. |
+| `copy_group_id` | Required for read; required for patch unless body includes `copy_group_id` | Used to select the group-specific setting. |
+
+The `/copy-settings` endpoint no longer falls back to the first settings row for a copy account. This prevents accidental global-looking edits when an account belongs to multiple copy groups.
+It also verifies that the current user can access the group and that the copy account is an actual member of that group.
 
 Patch body supports sizing, filters, product mapping, price mode, slippage, square-off flag, and enabled flag.
-
-### Orders
-
-| Method | Path | Description |
-| --- | --- | --- |
-| `GET` | `/orders/master` | List master orders visible to current user. |
-| `GET` | `/orders/copy` | List copy orders visible to current user. |
-
-Common query parameters:
-
-| Parameter | Default | Notes |
-| --- | --- | --- |
-| `search` | None | Matches symbols and order identifiers. |
-| `status` | None | Exact status filter. |
-| `limit` | `50` | Max `200`. |
-| `offset` | `0` | Must be non-negative. |
 
 ### Portfolio
 
@@ -238,9 +264,6 @@ Query parameters:
 
 Returned metrics:
 
-- `master_orders_today`
-- `successful_copied_orders`
-- `failed_copy_orders`
 - `active_copy_accounts`
 - `open_positions`
 - `total_pnl`

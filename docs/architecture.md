@@ -6,8 +6,8 @@ The application is organized as a multi-service monorepo. Each service has a nar
 
 | Component | Path | Responsibility |
 | --- | --- | --- |
-| Web app | `apps/web` | Next.js operator UI for login, dashboards, accounts, copy groups, orders, portfolio views, risk settings, logs, and settings. |
-| Main API | `apps/api` | User authentication, account CRUD, credential encryption, copy group/settings management, dashboard metrics, read-only order/portfolio/log APIs. |
+| Web app | `apps/web` | Next.js operator UI for login, dashboards, accounts, copy groups, live copy, Script Master search/watchlists, portfolio views, risk settings, logs, and settings. |
+| Main API | `apps/api` | User authentication, account CRUD, credential encryption, copy group/settings management, Script Master search/watchlists, dashboard metrics, and operational read APIs. |
 | Broker router | `apps/broker-router` | Internal broker gateway that decrypts account credentials, builds raw Sharekhan HTTP requests, handles token exchange, places orders, and manages Sharekhan WebSocket sessions. |
 | Copy worker | `apps/worker` | Redis queue consumer that turns master order jobs into copy orders after risk checks and broker-router placement. |
 | Shared package | `packages/shared` | TypeScript constants and common frontend-facing types. |
@@ -55,6 +55,7 @@ The main API is the public backend boundary for authenticated users. It owns:
 - Encrypted broker account storage.
 - Sharekhan login URL delegation, public callback request-token storage, immediate token-exchange delegation, and stored profile display.
 - Copy group and copy setting CRUD.
+- Script Master cache search and user/account-scoped watchlist persistence.
 - Read models for orders, positions, holdings, trades, logs, and dashboard metrics.
 - Delegation to broker-router for Sharekhan login URL generation and profile/access-token exchange.
 
@@ -130,8 +131,8 @@ sequenceDiagram
 2. Create one or more broker accounts with `account_type=COPY`.
 3. Create a copy group pointing to the master account.
 4. Add copy account members to the group.
-5. A default `copy_settings` row is created when a member is added.
-6. Patch the copy settings to tune sizing, filters, price behavior, and risk limits.
+5. A group-scoped `copy_settings` row is created when a member is added.
+6. Edit that member's settings on `/copy-groups/{id}` or through `PATCH /copy-groups/{group_id}/members/{member_id}` to tune sizing, filters, price behavior, and risk limits for that exact `copy_group_id + copy_account_id`.
 
 ### 4. Copy Order Execution
 
@@ -158,6 +159,26 @@ sequenceDiagram
     Worker->>DB: Insert copy_orders row
 ```
 
+### 5. Script Master Search And Watchlist
+
+```mermaid
+sequenceDiagram
+    participant Web
+    participant API
+    participant DB
+    Web->>API: GET /script-master/search?query=idea&account_id=...
+    API->>DB: Validate account ownership
+    API->>DB: Search script_master_instruments
+    API->>DB: Load matching account watchlist keys
+    API-->>Web: Instruments plus added state
+    Web->>API: POST /script-master/watchlist
+    API->>DB: Insert natural key plus instrument snapshot
+    API-->>Web: Watchlist item
+    Web->>API: GET /script-master/watchlist?account_id=...
+    API->>DB: Join current cache, fall back to snapshot
+    API-->>Web: Account watchlist
+```
+
 ## Data Flow Summary
 
 | Flow | Producer | Consumer | Transport | Durable write |
@@ -170,6 +191,7 @@ sequenceDiagram
 | Broker order placement | Worker | Broker router | HTTP JSON | `copy_orders` by worker |
 | Sharekhan feed / order ack messages | Sharekhan stream | Broker router | WebSocket | Redis pub/sub channel `sharekhan:ticks` today; future implementation should type or split feed and ack messages |
 | Main live updates | Web | Main API | WebSocket | None, heartbeat only |
+| Script Master search/watchlist | Browser | Main API | HTTP JSON | `script_master_watchlist_items` for add/remove mutations |
 
 ## Trust Boundaries
 

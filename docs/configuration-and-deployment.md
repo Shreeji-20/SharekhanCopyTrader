@@ -34,12 +34,15 @@ Variables in `.env.example`:
 | `SHAREKHAN_WS_URL` | Broker-router | `wss://stream.sharekhan.com/skstream/api/stream` | Sharekhan WebSocket base URL. Broker-router appends per-account `ACCESS_TOKEN` and `API_KEY` query params. |
 | `SHAREKHAN_VERSION_ID` | Broker-router | `1005` | Sharekhan access-token `versionId`. Used when exchanging request tokens for access tokens. |
 | `SCRIPT_MASTER_CACHE_TTL_HOURS` | API live copy manager | `24` | Hours before an exchange-scoped Script Master cache is considered stale and refreshed for missing-`scripCode` resolution. |
+| `SCRIPT_MASTER_PRELOAD_ON_LOGIN` | API accounts/script master services | `true` | When true, successful Sharekhan login schedules Script Master warm-up into PostgreSQL and the API process memory index. |
+| `SCRIPT_MASTER_PRELOAD_EXCHANGES` | API accounts/script master services | `NC,NF,BC,RN,MX` | Comma-separated exchanges to warm after login in addition to exchanges returned by Sharekhan profile. |
 | `BROKER_ROUTER_URL` | API, worker | `http://broker-router:8001` | Internal broker-router URL. |
 | `NEXT_PUBLIC_API_URL` | Web | `http://localhost:8000` | Browser-visible main API URL. |
 | `CORS_ORIGINS` | API | `http://localhost:3000,http://127.0.0.1:3000` | Comma-separated or JSON-array list of allowed browser origins. |
 | `BROKER_RATE_LIMIT_PER_MINUTE` | Broker-router | `120` | Per-client broker-router rate limit. |
 | `PAPER_TRADING_MODE` | API settings, broker-router, worker settings | `true` | Safety switch. Broker-router enforces this for order mutation endpoints. |
 | `COPY_TRADING_DRY_RUN` | API live copy manager | `true` | Safety switch for `/live-copy`. When true, copied child orders are recorded as would-send payloads instead of being sent to Sharekhan. |
+| `LIVE_COPY_ORDER_DISPATCH_CONCURRENCY` | API live copy manager | `0` | Copier order dispatch limit per master event. `0` means dispatch all prepared copier orders concurrently. Positive values intentionally throttle dispatch and are logged. |
 
 Additional settings present in code:
 

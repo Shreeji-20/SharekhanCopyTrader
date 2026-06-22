@@ -137,8 +137,13 @@ Supported sizing:
 
 Additional caps:
 
+- `min_qty`
 - `max_qty`
+- `max_trades_per_day`
+- `max_daily_loss`
 - `max_order_value`
+
+Live copy treats min/max quantity as guardrails. It skips when calculated quantity is outside the configured range; it does not silently resize to the cap.
 
 ### Price Controls
 
@@ -178,6 +183,7 @@ The main API records audit logs for user-facing mutations and login:
 - Broker stored profile view.
 - Copy group create/update/delete.
 - Copy group member add/remove.
+- Copy group member update.
 - Copy setting update.
 - Copy session start/pause/resume/stop/delete.
 
@@ -195,9 +201,9 @@ Treat these as high-risk operational actions:
 - Setting `COPY_TRADING_DRY_RUN=false`.
 - Updating `APP_SECRET_KEY`.
 - Changing `BROKER_ROUTER_URL`.
-- Editing copy settings for live copy accounts.
+- Editing group-member copy settings for live copy accounts.
 - Disabling symbol/product filters.
-- Increasing `max_qty` or `max_order_value`.
+- Increasing `max_qty`, `max_trades_per_day`, `max_daily_loss`, or `max_order_value`.
 - Adding a new copy account to an active group.
 - Running manual Redis jobs or live copy sessions against live accounts.
 

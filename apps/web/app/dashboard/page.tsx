@@ -1,16 +1,13 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Activity, AlertTriangle, CheckCircle2, Landmark, ListChecks, PlugZap, TrendingUp } from "lucide-react";
+import { Activity, Landmark, PlugZap, TrendingUp } from "lucide-react";
 import { Page } from "@/components/layout/page";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { apiFetch } from "@/lib/api";
 
 type Metrics = {
-  master_orders_today: number;
-  successful_copied_orders: number;
-  failed_copy_orders: number;
   active_copy_accounts: number;
   open_positions: number;
   total_pnl: string;
@@ -18,9 +15,6 @@ type Metrics = {
 };
 
 const emptyMetrics: Metrics = {
-  master_orders_today: 0,
-  successful_copied_orders: 0,
-  failed_copy_orders: 0,
   active_copy_accounts: 0,
   open_positions: 0,
   total_pnl: "0",
@@ -34,9 +28,6 @@ export default function DashboardPage() {
     retry: false
   });
   const cards = [
-    {label: "Master Orders", value: data.master_orders_today, icon: ListChecks},
-    {label: "Copied Success", value: data.successful_copied_orders, icon: CheckCircle2},
-    {label: "Copy Failed", value: data.failed_copy_orders, icon: AlertTriangle},
     {label: "Copy Accounts", value: data.active_copy_accounts, icon: Landmark},
     {label: "Open Positions", value: data.open_positions, icon: Activity},
     {label: "Total P&L", value: `Rs ${Number(data.total_pnl).toLocaleString("en-IN")}`, icon: TrendingUp},

@@ -73,7 +73,7 @@ export default function WebsocketTestPage() {
       appendLog(`Received message:\n${formatMessage(data)}`);
     };
 
-    websocket.onerror = (event) => {
+    websocket.onerror = () => {
       setLastError("WebSocket error occurred.");
       appendLog("WebSocket error");
     };

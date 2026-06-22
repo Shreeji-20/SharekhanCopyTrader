@@ -110,7 +110,7 @@ class BrokerAccount(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
 
     user: Mapped[User] = relationship(back_populates="accounts")
-    copy_settings: Mapped["CopySetting | None"] = relationship(back_populates="copy_account", uselist=False)
+    copy_settings: Mapped[list["CopySetting"]] = relationship(back_populates="copy_account")
 
 
 class CopyGroup(Base):
@@ -155,7 +155,10 @@ class CopySetting(Base):
     multiplier: Mapped[Decimal] = mapped_column(Numeric(18, 6), default=Decimal("1"), nullable=False)
     fixed_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
     capital_percent: Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
+    min_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_trades_per_day: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_daily_loss: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
     max_order_value: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
     allowed_symbols: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     blocked_symbols: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
@@ -327,11 +330,32 @@ class ScriptMasterInstrument(Base):
     strike_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 4), nullable=True)
     expiry_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     lot_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tick_size: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
     isin: Mapped[str | None] = mapped_column(String(32), nullable=True)
     raw_payload_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     refreshed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class ScriptMasterWatchlistItem(Base):
+    __tablename__ = "script_master_watchlist_items"
+    __table_args__ = (
+        UniqueConstraint("user_id", "account_id", "exchange", "scrip_code", name="uq_script_master_watchlist_user_account_scrip"),
+        Index("ix_script_master_watchlist_user_account", "user_id", "account_id"),
+        Index("ix_script_master_watchlist_exchange_scrip", "exchange", "scrip_code"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    account_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("broker_accounts.id", ondelete="CASCADE"), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(20), nullable=False)
+    scrip_code: Mapped[str] = mapped_column(String(40), nullable=False)
+    instrument_snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    user: Mapped[User] = relationship(foreign_keys=[user_id])
+    account: Mapped[BrokerAccount] = relationship(foreign_keys=[account_id])
 
 
 class Position(Base):

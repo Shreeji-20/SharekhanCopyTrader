@@ -1,13 +1,14 @@
 import secrets
 import uuid
 
-from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, BackgroundTasks, HTTPException, status
+from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 
 from app.audit import add_audit_log
 from app.dependencies import CurrentUser, DbSession
 from app.encryption import decrypt_secret, encrypt_secret
-from app.models import BrokerAccount, UserRole
+from app.models import BrokerAccount, CopyGroup, CopyGroupMember, CopySession, CopySessionStatus, UserRole
 from app.schemas import (
     BrokerAccountCreate,
     BrokerAccountRead,
@@ -19,6 +20,8 @@ from app.schemas import (
 )
 from app.security import mask_secret
 from app.services.broker_router import BrokerRouterClient
+from app.services.live_copy import live_copy_manager
+from app.services.script_master_preload import scheduled_login_preload_exchanges, warm_script_master_after_login
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
 
@@ -122,6 +125,13 @@ async def load_account(db: DbSession, account_id: uuid.UUID, current_user: Curre
     return account
 
 
+async def disconnect_account_stream(account_id: uuid.UUID) -> None:
+    try:
+        await BrokerRouterClient().ws_disconnect(account_id)
+    except Exception:
+        pass
+
+
 @router.get("", response_model=list[BrokerAccountRead])
 async def list_accounts(db: DbSession, current_user: CurrentUser) -> list[BrokerAccountRead]:
     statement = select(BrokerAccount).order_by(BrokerAccount.created_at.desc())
@@ -164,7 +174,11 @@ async def create_account(payload: BrokerAccountCreate, db: DbSession, current_us
 
 
 @router.post("/sharekhan/callback")
-async def sharekhan_callback(payload: SharekhanCallbackExchange, db: DbSession) -> dict[str, object]:
+async def sharekhan_callback(
+    payload: SharekhanCallbackExchange,
+    background_tasks: BackgroundTasks,
+    db: DbSession,
+) -> dict[str, object]:
     account: BrokerAccount | None = None
     if payload.state:
         account = await db.scalar(
@@ -203,12 +217,19 @@ async def sharekhan_callback(payload: SharekhanCallbackExchange, db: DbSession) 
         metadata={"source": "sharekhan_callback"},
     )
     await db.commit()
+    preload_exchanges = scheduled_login_preload_exchanges(result) if result.get("ok", True) else []
+    if preload_exchanges:
+        background_tasks.add_task(warm_script_master_after_login, account.id, result)
     return {
         "ok": bool(result.get("ok", True)),
         "account_id": str(account.id),
         "request_token_saved": True,
         "access_token_generated": bool(result.get("ok", True)),
         "profile": result,
+        "script_master_preload": {
+            "scheduled": bool(preload_exchanges),
+            "exchanges": preload_exchanges,
+        },
     }
 
 
@@ -253,17 +274,57 @@ async def update_account(
 
 
 @router.delete("/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_account(account_id: uuid.UUID, db: DbSession, current_user: CurrentUser) -> None:
+async def delete_account(
+    account_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> None:
     account = await load_account(db, account_id, current_user)
-    await db.delete(account)
+    master_ids = {
+        account.id,
+        *(
+            await db.scalars(
+                select(CopyGroup.master_account_id)
+                .join(CopyGroupMember, CopyGroupMember.copy_group_id == CopyGroup.id)
+                .where(CopyGroupMember.copy_account_id == account.id)
+            )
+        ).all(),
+    }
+    running_session_ids = (
+        await db.scalars(
+            select(CopySession.id).where(
+                CopySession.master_account_id == account.id,
+                CopySession.status.in_([CopySessionStatus.RUNNING, CopySessionStatus.PAUSED]),
+            )
+        )
+    ).all()
+    for session_id in running_session_ids:
+        await live_copy_manager.stop_session_task(session_id)
+    await db.execute(delete(CopyGroup).where(CopyGroup.master_account_id == account.id))
+    await db.execute(delete(BrokerAccount).where(BrokerAccount.id == account.id))
     await add_audit_log(
         db,
         action="broker_account.delete",
         entity_type="broker_account",
         entity_id=account_id,
         user_id=current_user.id,
+        metadata={
+            "account_type": account.account_type.value,
+            "stopped_sessions": [str(session_id) for session_id in running_session_ids],
+        },
     )
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Account could not be deleted because related trading records still reference it.",
+        ) from exc
+    for master_id in master_ids:
+        live_copy_manager.invalidate_master_targets(master_id)
+    background_tasks.add_task(disconnect_account_stream, account_id)
 
 
 @router.post("/{account_id}/sharekhan/login-url")
@@ -302,6 +363,7 @@ async def sharekhan_profile(account_id: uuid.UUID, db: DbSession, current_user: 
 async def sharekhan_token(
     account_id: uuid.UUID,
     payload: SharekhanTokenExchange,
+    background_tasks: BackgroundTasks,
     db: DbSession,
     current_user: CurrentUser,
 ) -> dict[str, object]:
@@ -315,6 +377,13 @@ async def sharekhan_token(
         user_id=current_user.id,
     )
     await db.commit()
+    preload_exchanges = scheduled_login_preload_exchanges(result) if result.get("ok", True) else []
+    if preload_exchanges:
+        background_tasks.add_task(warm_script_master_after_login, account_id, result)
+    result["script_master_preload"] = {
+        "scheduled": bool(preload_exchanges),
+        "exchanges": preload_exchanges,
+    }
     return result
 
 

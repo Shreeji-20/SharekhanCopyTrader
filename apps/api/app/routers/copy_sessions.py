@@ -162,6 +162,7 @@ async def start_copy_session(
     )
     await db.commit()
     await db.refresh(session)
+    await live_copy_manager.preload_session_targets(session.id)
     await _connect_master_ws_or_mark_error(db, session)
     await live_copy_manager.start_session_task(session.id)
     return session
@@ -202,6 +203,7 @@ async def pause_copy_session(session_id: uuid.UUID, db: DbSession, current_user:
     )
     await db.commit()
     await db.refresh(session)
+    live_copy_manager.invalidate_session_targets(session.id)
     return session
 
 
@@ -222,6 +224,7 @@ async def resume_copy_session(session_id: uuid.UUID, db: DbSession, current_user
     )
     await db.commit()
     await db.refresh(session)
+    await live_copy_manager.preload_session_targets(session.id)
     await _connect_master_ws_or_mark_error(db, session)
     await live_copy_manager.start_session_task(session.id)
     return session
@@ -242,6 +245,7 @@ async def stop_copy_session(session_id: uuid.UUID, db: DbSession, current_user: 
         )
         await db.commit()
         await db.refresh(session)
+        live_copy_manager.invalidate_session_targets(session.id)
     await live_copy_manager.stop_session_task(session.id)
     try:
         await BrokerRouterClient().ws_disconnect(session.master_account_id)
@@ -271,6 +275,7 @@ async def delete_copy_session(session_id: uuid.UUID, db: DbSession, current_user
         user_id=current_user.id,
     )
     await db.commit()
+    live_copy_manager.invalidate_session_targets(session_id)
 
 
 @router.get("/{session_id}/stream-status")

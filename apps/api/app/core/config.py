@@ -20,7 +20,10 @@ class Settings(BaseSettings):
     broker_router_url: str = Field("http://broker-router:8001", alias="BROKER_ROUTER_URL")
     paper_trading_mode: bool = Field(True, alias="PAPER_TRADING_MODE")
     copy_trading_dry_run: bool = Field(True, alias="COPY_TRADING_DRY_RUN")
+    live_copy_order_dispatch_concurrency: int = Field(0, alias="LIVE_COPY_ORDER_DISPATCH_CONCURRENCY")
     script_master_cache_ttl_hours: int = Field(24, alias="SCRIPT_MASTER_CACHE_TTL_HOURS")
+    script_master_preload_on_login: bool = Field(True, alias="SCRIPT_MASTER_PRELOAD_ON_LOGIN")
+    script_master_preload_exchanges: str = Field("NC,NF,BC,RN,MX", alias="SCRIPT_MASTER_PRELOAD_EXCHANGES")
     cors_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:3000", "http://127.0.0.1:3000"],
         alias="CORS_ORIGINS",
@@ -32,6 +35,18 @@ class Settings(BaseSettings):
         if isinstance(value, str) and value and not value.lstrip().startswith("["):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
+
+    @property
+    def script_master_preload_exchange_codes(self) -> list[str]:
+        exchanges: list[str] = []
+        seen: set[str] = set()
+        for value in self.script_master_preload_exchanges.split(","):
+            exchange = "".join(ch for ch in value.strip().upper() if ch.isalnum())
+            if not exchange or exchange in seen:
+                continue
+            seen.add(exchange)
+            exchanges.append(exchange)
+        return exchanges
 
     @model_validator(mode="after")
     def validate_production_secrets(self) -> "Settings":

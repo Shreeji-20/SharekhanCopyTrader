@@ -142,14 +142,13 @@ Use lucide icons with text labels. Recommended routes for trading/ops apps:
 - Dashboard
 - Accounts
 - New Account
+- Script Master
 - Copy Groups
 - Live Copy
-- Master Orders
-- Copy Orders
 - Positions
 - Holdings
 - Trades
-- Risk Settings
+- Risk Settings only if it is connected to group-member settings; otherwise treat it as a legacy/placeholder route
 - Settings
 - Logs
 
@@ -220,6 +219,22 @@ Use:
 ```tsx
 "rounded-lg border bg-card text-card-foreground"
 ```
+
+### Copy Group Detail
+
+The copy group detail screen should use a two-column desktop layout:
+
+- Left column: group summary, add copy account form, and preflight warnings.
+- Right column: copy member panels with per-member risk/copy settings.
+
+Member panels are bordered sections inside the main card, not nested cards. Each panel keeps:
+
+- Account name, login state, login ID, customer ID, and active badge in the header.
+- Save and remove actions on the right.
+- Responsive setting grids for sizing, quantity bounds, risk caps, side filters, symbol filters, product filters, price mode, and toggles.
+- `min-w-0` on containers and responsive `md:grid-cols-*` classes so long account names and setting rows do not create horizontal page overflow.
+
+Risk settings are scoped to `copy_group_id + copy_account_id`; do not design the screen as a global account settings editor.
 
 Card header:
 
@@ -301,6 +316,16 @@ Patterns:
 - Session controls: start, pause, resume, stop, delete.
 - Stream status panel must show connection, modules, ack subscribe, message counts, customer/proxy presence, and last event time.
 - Show recent outbound WebSocket frames and recent inbound stream payloads in compact diagnostic areas. The outbound order-streaming request must be visible as `{"action":"ack","key":[""],"value":["CUSTOMER_ID"]}` after module readiness.
+
+### Script Master
+
+- Put account selection and refresh in the page action area.
+- Use a search input with a familiar search icon and a two-option segmented control for Search and Watch List.
+- Keep the complete instrument schema in a horizontally scrollable table; do not hide derivative fields on mobile.
+- Use text buttons for the explicit `Add`, `Loading`, and `Added` command states.
+- Use an icon-only trash button with a tooltip/title for removal.
+- Raw provider fields belong in a bounded expandable `<details>` region with its own scroll area.
+- Loading, empty, and error states occupy the table body without shifting the table dimensions.
 
 ### Callback/Transient Screens
 

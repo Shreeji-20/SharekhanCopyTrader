@@ -229,3 +229,23 @@ def test_sharekhan_stream_status_for_missing_connection() -> None:
         "module_ready": False,
         "ack_subscription_sent": False,
     }
+
+
+def test_sharekhan_stream_status_returns_retained_history() -> None:
+    manager = SharekhanStreamManager()
+    account_id = uuid.uuid4()
+    connection = StreamConnection(account_id=account_id, access_token="access-token", api_key="api-key")
+    connection.sent_payloads = [
+        {"type": "ack", "sent_at": f"sent-{index}", "payload": {"index": index}}
+        for index in range(12)
+    ]
+    connection.recent_messages = [
+        {"type": "ack", "received_at": f"received-{index}", "payload": {"index": index}}
+        for index in range(12)
+    ]
+    manager.connections[account_id] = connection
+
+    status = manager.status(account_id)
+
+    assert len(status["sent_payloads"]) == 12
+    assert len(status["recent_messages"]) == 12

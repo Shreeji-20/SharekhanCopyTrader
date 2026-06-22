@@ -1,6 +1,6 @@
 # Frontend
 
-The frontend lives in `apps/web`. It is a Next.js App Router application for operators to manage accounts, copy groups, risk settings, order views, portfolio views, and logs.
+The frontend lives in `apps/web`. It is a Next.js App Router application for operators to manage accounts, copy groups, live copy sessions, Script Master watchlists, risk settings, portfolio views, and logs.
 
 ## Runtime
 
@@ -27,8 +27,7 @@ The frontend lives in `apps/web`. It is a Next.js App Router application for ope
 | `app/copy-groups/page.tsx` | Live copy groups table from `/copy-groups`. |
 | `app/copy-groups/[id]/page.tsx` | Live copy group metadata view with an empty member-table state. |
 | `app/live-copy/page.tsx` | Live copy session console with dry-run/live switch, session controls, stream diagnostics, master events, and copied order attempts. |
-| `app/orders/master/page.tsx` | Live master order table from `/orders/master`. |
-| `app/orders/copy/page.tsx` | Live copy order table from `/orders/copy`. |
+| `app/script-master/page.tsx` | Debounced Script Master search with account selection, full instrument details, add states, and an account-specific watchlist tab. |
 | `app/positions/page.tsx` | Live positions table from `/positions`. |
 | `app/holdings/page.tsx` | Live holdings table from `/holdings`. |
 | `app/trades/page.tsx` | Live trades table from `/trades`. |
@@ -78,10 +77,9 @@ The sidebar includes:
 - Dashboard
 - Accounts
 - New Account
+- Script Master
 - Copy Groups
 - Live Copy
-- Master Orders
-- Copy Orders
 - Positions
 - Holdings
 - Trades
@@ -101,14 +99,13 @@ The root path redirects to dashboard.
 | Accounts | Live API: `GET/PATCH/DELETE /accounts`, `POST /accounts/{id}/sharekhan/login-url` |
 | Sharekhan callback | Live API: `POST /accounts/sharekhan/callback` |
 | Copy Groups | Live API: `GET /copy-groups` |
-| Copy Group Detail | Live API: `GET /copy-groups/{id}` |
+| Copy Group Detail | Live API: `GET /copy-groups/{id}`, `POST /copy-groups/{id}/members`, `PATCH /copy-groups/{id}/members/{member_id}`, `DELETE /copy-groups/{id}/members/{member_id}` |
 | Live Copy | Live API: `GET/POST/DELETE /copy-sessions`, `POST /copy-groups/validate`, stream status through `GET /copy-sessions/{id}/stream-status` |
-| Master Orders | Live API: `GET /orders/master` |
-| Copy Orders | Live API: `GET /orders/copy` |
+| Script Master | Live API: `GET /script-master/search`, `POST/GET/DELETE /script-master/watchlist` |
 | Positions | Live API: `GET /positions` |
 | Holdings | Live API: `GET /holdings` |
 | Trades | Live API: `GET /trades` |
-| Risk Settings | Local state and toast only |
+| Risk Settings | Legacy placeholder. Production risk settings are edited per copy account inside `/copy-groups/{id}`. |
 | Settings | Local state, browser confirm, and toast only |
 | Logs | Live API: `GET /logs` |
 
@@ -181,15 +178,22 @@ Before navigating to Sharekhan, the Accounts page stores the pending account id 
 
 Dashboard fetches aggregate metrics from the API and displays:
 
-- Master orders today.
-- Copied success count.
-- Failed copy count.
 - Active copy accounts.
 - Open positions.
 - Total PnL.
 - Broker connection status.
 
 The copy-flow panel shows an empty state until a real event series endpoint is added.
+
+### Copy Group Risk Settings
+
+1. User opens `/copy-groups/{id}`.
+2. Frontend loads the group detail, member list, group-scoped copy settings, accounts, and validation warnings.
+3. Adding a copy account sends `POST /copy-groups/{id}/members` with both `copy_account_id` and initial `copy_setting`.
+4. Each member panel edits only that member's `(copy_group_id, copy_account_id)` settings.
+5. Saving a member sends `PATCH /copy-groups/{id}/members/{member_id}` with `is_enabled` and `copy_setting`.
+6. The UI supports sizing mode, multiplier, fixed quantity, capital percent, min/max quantity, max trades per day, max daily loss, max order value, side filters, product filters, product mapping, symbol allow/block lists, price mode, slippage, setting enabled, member enabled, and auto-squareoff flag.
+7. Removing a member sends `DELETE /copy-groups/{id}/members/{member_id}` and the backend deletes the matching settings row.
 
 ### Live Copy Monitoring
 
@@ -199,6 +203,17 @@ The copy-flow panel shows an empty state until a real event series endpoint is a
 4. Session controls call pause, resume, stop, or delete endpoints.
 5. Stream Status polls `GET /copy-sessions/{session_id}/stream-status`.
 6. Stream diagnostics display connection state, module readiness, order ack subscription state, message counts, latest error, recent outbound frames, and recent inbound frames. The outbound order-streaming request should appear in sent frames as `{"action":"ack","key":[""],"value":["CUSTOMER_ID"]}`.
+
+### Script Master Search And Watchlist
+
+1. User opens `/script-master` and selects an active broker account.
+2. Search input is debounced by 350 ms and activates after two characters.
+3. Results include normalized Script Master fields and an expandable raw-payload view.
+4. Add buttons show `Add`, `Loading`, or `Added` using account-specific watchlist state returned by the API.
+5. The Watch List tab loads saved instruments for the selected account and exposes an icon-only remove action.
+6. Both tables show loading, error, and empty states and use horizontal scrolling for the full instrument schema on narrow screens.
+
+See [Script Master Search And Watchlist](script-master-search-and-watchlist.md) for backend ownership and persistence behavior.
 
 ## Auth And Routing Notes
 
@@ -213,11 +228,11 @@ The copy-flow panel shows an empty state until a real event series endpoint is a
 - The demo data module has been removed. Screens with no persisted data show empty states.
 - Account list responses include `credentials_readable`; the UI maps `false` to `CREDENTIALS_LOCKED` instead of failing the whole account list.
 - Live Copy shows both recent outbound WebSocket frames and recent inbound stream messages so module/ack subscription issues can be diagnosed without opening container logs.
-- Copy group member management and risk settings still need full live form workflows.
+- Script Master search keeps the wide instrument schema in one horizontally scrollable table and preserves provider-specific fields through an expandable raw JSON cell.
+- Copy group detail uses a responsive member-panel layout with bounded controls instead of a wide table, so risk settings remain editable on smaller screens.
 
 ## Integration Checklist For Future Work
 
-1. Add forms for copy group creation, member management, and copy settings patching.
-2. Connect risk settings UI to `GET/PATCH /copy-settings/{copy_account_id}`.
-3. Connect `/ws/live` or a future live endpoint for real-time order/tick updates.
-4. Add optimistic states and richer loading skeletons for operational screens.
+1. Connect `/ws/live` or a future live endpoint for real-time order/tick updates.
+2. Add optimistic states and richer loading skeletons for operational screens.
+3. Replace or redirect the legacy standalone Risk Settings placeholder now that production risk settings are group-member scoped.

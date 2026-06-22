@@ -10,14 +10,32 @@ from app.core.config import get_settings
 class BrokerRouterClient:
     def __init__(self, base_url: str | None = None) -> None:
         self.base_url = (base_url or get_settings().broker_router_url).rstrip("/")
+        self._client: httpx.AsyncClient | None = None
+
+    async def __aenter__(self) -> "BrokerRouterClient":
+        self._client = httpx.AsyncClient(base_url=self.base_url, timeout=30)
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        if self._client:
+            await self._client.aclose()
+            self._client = None
 
     async def post(self, path: str, json: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self._client:
+            response = await self._client.post(path, json=json or {})
+            self._raise_for_broker_error(response)
+            return response.json()
         async with httpx.AsyncClient(base_url=self.base_url, timeout=30) as client:
             response = await client.post(path, json=json or {})
             self._raise_for_broker_error(response)
             return response.json()
 
     async def get(self, path: str) -> dict[str, Any]:
+        if self._client:
+            response = await self._client.get(path)
+            self._raise_for_broker_error(response)
+            return response.json()
         async with httpx.AsyncClient(base_url=self.base_url, timeout=30) as client:
             response = await client.get(path)
             self._raise_for_broker_error(response)

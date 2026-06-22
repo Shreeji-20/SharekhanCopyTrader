@@ -7,11 +7,12 @@ import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from time import perf_counter
 from typing import Any
 
 import redis.asyncio as redis
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.config import get_settings
 from app.db.session import AsyncSessionLocal
@@ -26,6 +27,7 @@ from app.models import (
     CopySetting,
     MasterTradeEvent,
     PriceMode,
+    Position,
     SizingMode,
 )
 from app.services.broker_router import BrokerRouterClient
@@ -65,6 +67,51 @@ class NormalizedTradeEvent:
     lot_size: int | None = None
     scrip_code_resolution_status: str | None = None
     scrip_code_resolution_message: str | None = None
+
+
+@dataclass(frozen=True)
+class CopyRiskUsage:
+    trades_today: int = 0
+    current_daily_loss: Decimal = Decimal("0")
+
+
+@dataclass(frozen=True)
+class CopyTargetPlan:
+    member_id: uuid.UUID
+    copy_group_id: uuid.UUID
+    copy_group_name: str
+    setting: CopySetting
+    copy_account: BrokerAccount
+
+
+@dataclass(frozen=True)
+class CachedCopyTargets:
+    master_account_id: uuid.UUID
+    group_ids: tuple[str, ...]
+    loaded_at: float
+    targets: tuple[CopyTargetPlan, ...]
+
+
+@dataclass(frozen=True)
+class CopyTargetResult:
+    target: CopyTargetPlan
+    order_status: CopiedTradeOrderStatus
+    request_payload: dict[str, Any]
+    response_payload: dict[str, Any]
+    child_order_id: str | None
+    error_message: str | None
+    duration_ms: float
+    dispatch_started_at: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+    start_offset_ms: float | None = None
+    dispatch_gap_ms: float | None = None
+
+
+@dataclass(frozen=True)
+class PreparedCopyOrder:
+    target: CopyTargetPlan
+    request_payload: dict[str, Any]
 
 
 def _first(data: dict[str, Any], *keys: str) -> Any:
@@ -116,6 +163,10 @@ def _decimal_json(value: Decimal) -> str:
     return format(value.quantize(Decimal("0.01"), rounding=ROUND_DOWN), "f")
 
 
+def _utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _parse_event_time(value: Any) -> datetime | None:
     if value in (None, ""):
         return None
@@ -141,6 +192,15 @@ def _normalize_order_type(value: Any) -> str:
     return order_type
 
 
+def _normalize_side(value: Any) -> str:
+    side = _upper(value, "")
+    if side in {"B", "BUY"}:
+        return "B"
+    if side in {"S", "SELL"}:
+        return "S"
+    return side
+
+
 def _scrip_code(data: dict[str, Any]) -> int | None:
     value = _first(data, "ScripCode", "scripCode", "ScripToken", "Token", "ExchangeScripCode")
     parsed = _int_value(value, 0)
@@ -159,13 +219,16 @@ def normalize_sharekhan_ack(payload: Any) -> NormalizedTradeEvent | None:
 
     trade_qty = _int_value(_first(data, "TradeQty", "tradeQty"), 0)
     ack_state = _upper(_first(data, "AckState", "ackState"), "")
+    compact_ack_state = "".join(ch for ch in ack_state if ch.isalnum())
     is_fill_state = any(marker in ack_state for marker in ("TRADE", "EXEC", "FILL"))
-    if trade_qty <= 0 and not is_fill_state:
+    is_rejected_state = any(marker in compact_ack_state for marker in ("REJECT", "CANCEL", "FAIL", "ERROR"))
+    is_new_order_state = "NEWORDER" in compact_ack_state and not is_rejected_state
+    if trade_qty <= 0 and not is_fill_state and not is_new_order_state:
         return None
 
     quantity = trade_qty or _int_value(_first(data, "OrderQty", "orderQty", "Qty"), 0)
     symbol = _upper(_first(data, "TradingSymbol", "tradingSymbol", "Symbol"), "")
-    side = _upper(_first(data, "BuySellString", "transactionType", "Side"), "")
+    side = _normalize_side(_first(data, "BuySellString", "transactionType", "Side"))
     exchange = _upper(_first(data, "Exchange", "exchange", "exchangeCode"), "")
     price = _decimal_value(_first(data, "TradePrice", "tradePrice"), Decimal("0"))
     if price <= 0:
@@ -177,15 +240,17 @@ def normalize_sharekhan_ack(payload: Any) -> NormalizedTradeEvent | None:
     event_time = event_time or _parse_event_time(payload.get("timestamp"))
     external_trade_id = _string_or_none(_first(data, "TradeID", "tradeId"))
     external_order_id = _string_or_none(_first(data, "SharekhanOrderID", "ExchangeOrderID", "orderId"))
-    identity = {
-        "trade": external_trade_id,
-        "order": external_order_id,
-        "symbol": symbol,
-        "side": side,
-        "quantity": quantity,
-        "price": str(price),
-        "event_time": event_time.isoformat() if event_time else None,
-    }
+    if external_order_id:
+        identity = {"order": external_order_id, "symbol": symbol, "side": side}
+    else:
+        identity = {
+            "trade": external_trade_id,
+            "symbol": symbol,
+            "side": side,
+            "quantity": quantity,
+            "price": str(price),
+            "event_time": event_time.isoformat() if event_time else None,
+        }
     duplicate_hash = hashlib.sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()
 
     return NormalizedTradeEvent(
@@ -225,10 +290,14 @@ def calculate_copy_quantity(master_quantity: int, setting: CopySetting) -> int:
         raise CopySkip("PERCENT_CAPITAL sizing requires synced account capital and is not enabled for live WebSocket copying yet.")
     else:
         quantity = 0
-    if setting.max_qty:
-        quantity = min(quantity, setting.max_qty)
     if quantity <= 0:
         raise CopySkip("Calculated quantity is zero.")
+    min_qty = getattr(setting, "min_qty", None)
+    max_qty = getattr(setting, "max_qty", None)
+    if min_qty and quantity < min_qty:
+        raise CopySkip("Calculated quantity is below min_qty.")
+    if max_qty and quantity > max_qty:
+        raise CopySkip("Calculated quantity exceeds max_qty.")
     return quantity
 
 
@@ -250,6 +319,7 @@ def build_sharekhan_copy_order_payload(
     event: NormalizedTradeEvent,
     setting: CopySetting,
     copy_account: BrokerAccount,
+    risk_usage: CopyRiskUsage | None = None,
 ) -> dict[str, Any]:
     if not copy_account.is_active:
         raise CopySkip("Copy account is inactive.")
@@ -293,6 +363,13 @@ def build_sharekhan_copy_order_payload(
     value_price = event.price if price == 0 else price
     if setting.max_order_value and value_price * quantity > setting.max_order_value:
         raise CopySkip("Calculated order value exceeds max_order_value.")
+    risk_usage = risk_usage or CopyRiskUsage()
+    max_trades_per_day = getattr(setting, "max_trades_per_day", None)
+    max_daily_loss = getattr(setting, "max_daily_loss", None)
+    if max_trades_per_day and risk_usage.trades_today >= max_trades_per_day:
+        raise CopySkip("max_trades_per_day has already been reached for this copy account in this group.")
+    if max_daily_loss and risk_usage.current_daily_loss >= max_daily_loss:
+        raise CopySkip("max_daily_loss has already been reached for this copy account.")
 
     payload: dict[str, Any] = {
         "customerId": copy_account.customer_id,
@@ -339,7 +416,28 @@ def extract_child_order_id(response: dict[str, Any]) -> str | None:
 class LiveCopyManager:
     def __init__(self) -> None:
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._target_cache: dict[str, CachedCopyTargets] = {}
+        self._target_cache_ttl_seconds = 15.0
         self._lock = asyncio.Lock()
+
+    def invalidate_session_targets(self, session_id: uuid.UUID | str) -> None:
+        self._target_cache.pop(str(session_id), None)
+
+    def invalidate_master_targets(self, master_account_id: uuid.UUID | str) -> None:
+        master_key = str(master_account_id)
+        stale_session_ids = [
+            session_id
+            for session_id, cached in self._target_cache.items()
+            if str(cached.master_account_id) == master_key
+        ]
+        for session_id in stale_session_ids:
+            self._target_cache.pop(session_id, None)
+
+    async def preload_session_targets(self, session_id: uuid.UUID) -> None:
+        async with AsyncSessionLocal() as db:
+            session = await db.get(CopySession, session_id)
+            if session and session.status in {CopySessionStatus.RUNNING, CopySessionStatus.PAUSED}:
+                await self._load_copy_targets(db, session, {})
 
     async def start_session_task(self, session_id: uuid.UUID) -> None:
         key = str(session_id)
@@ -351,6 +449,7 @@ class LiveCopyManager:
 
     async def stop_session_task(self, session_id: uuid.UUID) -> None:
         key = str(session_id)
+        self.invalidate_session_targets(key)
         async with self._lock:
             task = self._tasks.pop(key, None)
         if task:
@@ -378,6 +477,7 @@ class LiveCopyManager:
         async with self._lock:
             tasks = list(self._tasks.values())
             self._tasks.clear()
+            self._target_cache.clear()
         for task in tasks:
             task.cancel()
         for task in tasks:
@@ -422,6 +522,7 @@ class LiveCopyManager:
             return session is None or session.status in {CopySessionStatus.STOPPED, CopySessionStatus.ERROR}
 
     async def _mark_session_error(self, session_id: str, error: str) -> None:
+        self.invalidate_session_targets(session_id)
         async with AsyncSessionLocal() as db:
             session = await db.get(CopySession, uuid.UUID(session_id))
             if session:
@@ -430,6 +531,16 @@ class LiveCopyManager:
                 await db.commit()
 
     async def process_redis_message(self, session_id: uuid.UUID, message: dict[str, Any]) -> MasterTradeEvent | None:
+        received_perf = perf_counter()
+        logger.info(
+            "live_copy.websocket_event_received",
+            extra={
+                "session_id": str(session_id),
+                "account_id": str(message.get("account_id")),
+                "message_type": message.get("type"),
+                "received_at": _utc_timestamp(),
+            },
+        )
         async with AsyncSessionLocal() as db:
             session = await db.get(CopySession, session_id)
             if not session or session.status != CopySessionStatus.RUNNING:
@@ -438,26 +549,40 @@ class LiveCopyManager:
                 return None
             if message.get("type") not in {None, "ack", "feed"}:
                 return None
+            parse_started = perf_counter()
             normalized = normalize_sharekhan_ack(message.get("payload"))
+            parse_ms = (perf_counter() - parse_started) * 1000
             if normalized is None:
                 return None
-            return await self.copy_normalized_event(db, session, normalized)
+            return await self.copy_normalized_event(
+                db,
+                session,
+                normalized,
+                timings={"_received_perf": received_perf, "parse_ms": parse_ms},
+            )
 
     async def copy_normalized_event(
         self,
         db: Any,
         session: CopySession,
         normalized: NormalizedTradeEvent,
+        timings: dict[str, float] | None = None,
     ) -> MasterTradeEvent | None:
+        timings = timings or {"_received_perf": perf_counter()}
+        total_started = timings.get("_received_perf", perf_counter())
+        duplicate_started = perf_counter()
         existing = await db.scalar(
             select(MasterTradeEvent).where(
                 MasterTradeEvent.session_id == session.id,
                 MasterTradeEvent.duplicate_hash == normalized.duplicate_hash,
             )
         )
+        timings["duplicate_lookup_ms"] = (perf_counter() - duplicate_started) * 1000
         if existing:
             return None
+        scrip_started = perf_counter()
         normalized = await self._resolve_missing_scrip_code(db, session, normalized)
+        timings["scrip_code_resolution_ms"] = (perf_counter() - scrip_started) * 1000
         event = MasterTradeEvent(
             session_id=session.id,
             master_account_id=session.master_account_id,
@@ -477,11 +602,36 @@ class LiveCopyManager:
         )
         db.add(event)
         await db.flush()
-        statuses = await self._copy_event_to_targets(db, session, event, normalized)
+        statuses = await self._copy_event_to_targets(db, session, event, normalized, timings)
         event.copied_status = self._event_status(statuses)
+        timings["total_master_to_copier_ms"] = (perf_counter() - total_started) * 1000
+        event.raw_payload_json = self._payload_with_timings(normalized.raw_payload, timings)
+        logger.info(
+            "live_copy.master_event_complete",
+            extra={
+                "session_id": str(session.id),
+                "master_account_id": str(session.master_account_id),
+                "event_id": str(event.id),
+                "symbol": normalized.symbol,
+                "exchange": normalized.exchange,
+                "status": event.copied_status,
+                "target_count": len(statuses),
+                "placement_mode": "concurrent",
+                "timings_ms": self._public_timings(timings),
+            },
+        )
         await db.commit()
         await db.refresh(event)
         return event
+
+    @staticmethod
+    def _public_timings(timings: dict[str, float]) -> dict[str, float]:
+        return {key: round(value, 3) for key, value in timings.items() if not key.startswith("_")}
+
+    def _payload_with_timings(self, payload: dict[str, Any], timings: dict[str, float]) -> dict[str, Any]:
+        output = dict(payload)
+        output["live_copy_timing_ms"] = self._public_timings(timings)
+        return output
 
     async def _resolve_missing_scrip_code(
         self,
@@ -505,6 +655,7 @@ class LiveCopyManager:
                 isin=normalized.isin,
             ),
             account_id=session.master_account_id,
+            refresh_stale=False,
         )
         raw_payload = dict(normalized.raw_payload)
         raw_payload["script_master_resolution"] = resolution.to_payload()
@@ -549,10 +700,67 @@ class LiveCopyManager:
         session: CopySession,
         event: MasterTradeEvent,
         normalized: NormalizedTradeEvent,
+        timings: dict[str, float],
     ) -> list[CopiedTradeOrderStatus]:
-        group_ids = [uuid.UUID(value) for value in session.active_group_ids]
-        if not group_ids:
+        target_load_started = perf_counter()
+        targets = await self._load_copy_targets(db, session, timings)
+        timings["target_load_ms"] = (perf_counter() - target_load_started) * 1000
+        if not targets:
             return []
+
+        risk_started = perf_counter()
+        risk_usage = await self._load_risk_usage(db, targets)
+        timings["risk_lookup_ms"] = (perf_counter() - risk_started) * 1000
+
+        dispatch_started = perf_counter()
+        results = await self._copy_targets_concurrently(session, normalized, targets, risk_usage)
+        timings["order_dispatch_ms"] = (perf_counter() - dispatch_started) * 1000
+        timings["copier_target_count"] = len(targets)
+        timings["prepared_order_count"] = sum(1 for result in results if result.started_at is not None)
+        timings["max_dispatch_gap_ms"] = max((result.dispatch_gap_ms or 0 for result in results), default=0)
+        statuses: list[CopiedTradeOrderStatus] = []
+        for result in results:
+            target = result.target
+            copied_order = CopiedTradeOrder(
+                master_trade_event_id=event.id,
+                copy_group_id=target.copy_group_id,
+                copier_account_id=target.copy_account.id,
+                request_payload_json=result.request_payload,
+                response_payload_json=result.response_payload,
+                child_order_id=result.child_order_id,
+                status=result.order_status,
+                error_message=result.error_message,
+            )
+            db.add(copied_order)
+            statuses.append(result.order_status)
+        await db.flush()
+        return statuses
+
+    async def _load_copy_targets(
+        self,
+        db: Any,
+        session: CopySession,
+        timings: dict[str, float],
+    ) -> tuple[CopyTargetPlan, ...]:
+        group_ids = tuple(str(value) for value in session.active_group_ids)
+        if not group_ids:
+            return ()
+        cache_key = str(session.id)
+        cached = self._target_cache.get(cache_key)
+        if (
+            cached
+            and cached.master_account_id == session.master_account_id
+            and cached.group_ids == group_ids
+            and perf_counter() - cached.loaded_at <= self._target_cache_ttl_seconds
+        ):
+            timings["target_cache_hit"] = 1
+            logger.info(
+                "live_copy.copy_targets_cache_hit",
+                extra={"session_id": str(session.id), "target_count": len(cached.targets)},
+            )
+            return cached.targets
+
+        timings["target_cache_hit"] = 0
         rows = (
             await db.execute(
                 select(CopyGroupMember, CopySetting, BrokerAccount, CopyGroup)
@@ -564,54 +772,405 @@ class LiveCopyManager:
                     & (CopySetting.copy_account_id == CopyGroupMember.copy_account_id),
                 )
                 .where(
-                    CopyGroup.id.in_(group_ids),
+                    CopyGroup.id.in_([uuid.UUID(value) for value in group_ids]),
                     CopyGroup.master_account_id == session.master_account_id,
                     CopyGroupMember.is_enabled.is_(True),
                 )
                 .order_by(CopyGroup.created_at.asc(), BrokerAccount.account_name.asc())
             )
         ).all()
-        statuses: list[CopiedTradeOrderStatus] = []
+        targets: list[CopyTargetPlan] = []
         seen_accounts: set[uuid.UUID] = set()
         for member, setting, copy_account, group in rows:
             if copy_account.id in seen_accounts:
+                logger.warning(
+                    "live_copy.duplicate_copier_skipped",
+                    extra={
+                        "session_id": str(session.id),
+                        "copy_account_id": str(copy_account.id),
+                        "copy_group_id": str(group.id),
+                    },
+                )
                 continue
             seen_accounts.add(copy_account.id)
             if not setting:
-                setting = CopySetting(
-                    copy_account_id=copy_account.id,
-                    copy_group_id=group.id,
-                    sizing_mode=SizingMode.SAME_QTY,
-                    multiplier=Decimal("1"),
-                    allowed_symbols=[],
-                    blocked_symbols=[],
-                    allowed_transaction_types=["B", "S"],
-                    allowed_product_types=[],
-                    product_type_map={},
-                    price_mode=PriceMode.SAME_PRICE,
-                    is_auto_squareoff_enabled=False,
-                    is_enabled=True,
+                setting = self._default_setting(copy_account.id, group.id)
+            targets.append(
+                CopyTargetPlan(
+                    member_id=member.id,
+                    copy_group_id=member.copy_group_id,
+                    copy_group_name=group.name,
+                    setting=setting,
+                    copy_account=copy_account,
                 )
-            order_status, request_payload, response_payload, child_order_id, error_message = await self._copy_one_target(
-                session,
-                normalized,
-                setting,
-                copy_account,
             )
-            copied_order = CopiedTradeOrder(
-                master_trade_event_id=event.id,
-                copy_group_id=member.copy_group_id,
-                copier_account_id=copy_account.id,
-                request_payload_json=request_payload,
-                response_payload_json=response_payload,
-                child_order_id=child_order_id,
-                status=order_status,
-                error_message=error_message,
+        cached_targets = tuple(targets)
+        self._target_cache[cache_key] = CachedCopyTargets(
+            master_account_id=session.master_account_id,
+            group_ids=group_ids,
+            loaded_at=perf_counter(),
+            targets=cached_targets,
+        )
+        logger.info(
+            "live_copy.copy_targets_cache_loaded",
+            extra={"session_id": str(session.id), "target_count": len(cached_targets), "group_count": len(group_ids)},
+        )
+        return cached_targets
+
+    @staticmethod
+    def _default_setting(copy_account_id: uuid.UUID, copy_group_id: uuid.UUID) -> CopySetting:
+        return CopySetting(
+            copy_account_id=copy_account_id,
+            copy_group_id=copy_group_id,
+            sizing_mode=SizingMode.SAME_QTY,
+            multiplier=Decimal("1"),
+            allowed_symbols=[],
+            blocked_symbols=[],
+            allowed_transaction_types=["B", "S"],
+            allowed_product_types=[],
+            product_type_map={},
+            price_mode=PriceMode.SAME_PRICE,
+            is_auto_squareoff_enabled=False,
+            is_enabled=True,
+        )
+
+    async def _load_risk_usage(
+        self,
+        db: Any,
+        targets: tuple[CopyTargetPlan, ...],
+    ) -> dict[tuple[uuid.UUID, uuid.UUID], CopyRiskUsage]:
+        usage: dict[tuple[uuid.UUID, uuid.UUID], CopyRiskUsage] = {
+            (target.copy_group_id, target.copy_account.id): CopyRiskUsage()
+            for target in targets
+        }
+        needs_trade_counts = any(getattr(target.setting, "max_trades_per_day", None) for target in targets)
+        needs_daily_loss = any(getattr(target.setting, "max_daily_loss", None) for target in targets)
+        trade_counts: dict[tuple[uuid.UUID, uuid.UUID], int] = {}
+        if needs_trade_counts:
+            day_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+            rows = (
+                await db.execute(
+                    select(
+                        CopiedTradeOrder.copy_group_id,
+                        CopiedTradeOrder.copier_account_id,
+                        func.count(CopiedTradeOrder.id),
+                    )
+                    .where(
+                        CopiedTradeOrder.status == CopiedTradeOrderStatus.PLACED,
+                        CopiedTradeOrder.created_at >= day_start,
+                        CopiedTradeOrder.copy_group_id.in_([target.copy_group_id for target in targets]),
+                        CopiedTradeOrder.copier_account_id.in_([target.copy_account.id for target in targets]),
+                    )
+                    .group_by(CopiedTradeOrder.copy_group_id, CopiedTradeOrder.copier_account_id)
+                )
+            ).all()
+            trade_counts = {
+                (copy_group_id, copier_account_id): int(count or 0)
+                for copy_group_id, copier_account_id, count in rows
+            }
+
+        daily_losses: dict[uuid.UUID, Decimal] = {}
+        if needs_daily_loss:
+            rows = (
+                await db.execute(
+                    select(Position.broker_account_id, func.coalesce(func.sum(Position.pnl), 0))
+                    .where(Position.broker_account_id.in_([target.copy_account.id for target in targets]))
+                    .group_by(Position.broker_account_id)
+                )
+            ).all()
+            for account_id, pnl in rows:
+                pnl_value = Decimal(str(pnl or 0))
+                daily_losses[account_id] = abs(pnl_value) if pnl_value < 0 else Decimal("0")
+
+        for target in targets:
+            key = (target.copy_group_id, target.copy_account.id)
+            usage[key] = CopyRiskUsage(
+                trades_today=trade_counts.get(key, 0),
+                current_daily_loss=daily_losses.get(target.copy_account.id, Decimal("0")),
             )
-            db.add(copied_order)
-            statuses.append(order_status)
-        await db.flush()
-        return statuses
+        return usage
+
+    async def _copy_targets_concurrently(
+        self,
+        session: CopySession,
+        normalized: NormalizedTradeEvent,
+        targets: tuple[CopyTargetPlan, ...],
+        risk_usage: dict[tuple[uuid.UUID, uuid.UUID], CopyRiskUsage],
+    ) -> list[CopyTargetResult]:
+        prepared_orders, skipped_results = self._prepare_copy_orders(session, normalized, targets, risk_usage)
+        settings = get_settings()
+        dispatch_limit = max(0, settings.live_copy_order_dispatch_concurrency)
+        if not prepared_orders:
+            logger.info(
+                "live_copy.dispatch_skipped_no_prepared_orders",
+                extra={
+                    "session_id": str(session.id),
+                    "target_count": len(targets),
+                    "skipped_count": len(skipped_results),
+                },
+            )
+            return skipped_results
+
+        dispatch_started_at = _utc_timestamp()
+        dispatch_started_perf = perf_counter()
+        logger.info(
+            "live_copy.dispatch_started",
+            extra={
+                "session_id": str(session.id),
+                "target_count": len(targets),
+                "prepared_count": len(prepared_orders),
+                "skipped_count": len(skipped_results),
+                "placement_mode": "concurrent",
+                "dispatch_started_at": dispatch_started_at,
+                "dispatch_concurrency_limit": dispatch_limit or "unlimited",
+                "broker_throttle_active": dispatch_limit > 0,
+            },
+        )
+        semaphore = asyncio.Semaphore(dispatch_limit) if dispatch_limit > 0 else None
+        async with BrokerRouterClient() as broker_router:
+            raw_results = await asyncio.gather(
+                *[
+                    self._place_prepared_order(
+                        session,
+                        prepared,
+                        broker_router,
+                        dispatch_started_perf,
+                        dispatch_started_at,
+                        semaphore,
+                    )
+                    for prepared in prepared_orders
+                ],
+                return_exceptions=True,
+            )
+        dispatched_results = [
+            self._result_from_exception(prepared, result)
+            if isinstance(result, Exception)
+            else result
+            for prepared, result in zip(prepared_orders, raw_results, strict=True)
+        ]
+        dispatched_results = self._with_dispatch_gaps(dispatched_results)
+        batch_duration_ms = (perf_counter() - dispatch_started_perf) * 1000
+        max_dispatch_gap_ms = max(
+            (result.dispatch_gap_ms or 0 for result in dispatched_results),
+            default=0,
+        )
+        logger.info(
+            "live_copy.dispatch_completed",
+            extra={
+                "session_id": str(session.id),
+                "prepared_count": len(prepared_orders),
+                "skipped_count": len(skipped_results),
+                "placed_count": sum(1 for result in dispatched_results if result.order_status == CopiedTradeOrderStatus.PLACED),
+                "failed_count": sum(1 for result in dispatched_results if result.order_status == CopiedTradeOrderStatus.FAILED),
+                "dispatch_completed_at": _utc_timestamp(),
+                "total_batch_duration_ms": round(batch_duration_ms, 3),
+                "max_dispatch_gap_ms": round(max_dispatch_gap_ms, 3),
+                "placement_mode": "concurrent",
+                "broker_throttle_active": dispatch_limit > 0,
+            },
+        )
+        return skipped_results + dispatched_results
+
+    def _prepare_copy_orders(
+        self,
+        session: CopySession,
+        normalized: NormalizedTradeEvent,
+        targets: tuple[CopyTargetPlan, ...],
+        risk_usage: dict[tuple[uuid.UUID, uuid.UUID], CopyRiskUsage],
+    ) -> tuple[tuple[PreparedCopyOrder, ...], list[CopyTargetResult]]:
+        settings = get_settings()
+        prepared_orders: list[PreparedCopyOrder] = []
+        skipped_results: list[CopyTargetResult] = []
+        preparation_started = perf_counter()
+        for target in targets:
+            target_started = perf_counter()
+            try:
+                request_payload = build_sharekhan_copy_order_payload(
+                    normalized,
+                    target.setting,
+                    target.copy_account,
+                    risk_usage.get((target.copy_group_id, target.copy_account.id), CopyRiskUsage()),
+                )
+            except CopySkip as exc:
+                skipped_results.append(
+                    CopyTargetResult(
+                        target=target,
+                        order_status=CopiedTradeOrderStatus.SKIPPED,
+                        request_payload={},
+                        response_payload={"skipped": True},
+                        child_order_id=None,
+                        error_message=str(exc),
+                        duration_ms=(perf_counter() - target_started) * 1000,
+                    )
+                )
+                logger.info(
+                    "live_copy.copier_order_preparation_skipped",
+                    extra={
+                        "session_id": str(session.id),
+                        "copy_group_id": str(target.copy_group_id),
+                        "copy_account_id": str(target.copy_account.id),
+                        "reason": str(exc),
+                    },
+                )
+                continue
+
+            if session.dry_run or settings.paper_trading_mode or settings.copy_trading_dry_run:
+                skipped_results.append(
+                    CopyTargetResult(
+                        target=target,
+                        order_status=CopiedTradeOrderStatus.SKIPPED,
+                        request_payload=request_payload,
+                        response_payload={"dry_run": True, "message": "Order was not sent to Sharekhan."},
+                        child_order_id=None,
+                        error_message="DRY_RUN: order not sent to Sharekhan.",
+                        duration_ms=(perf_counter() - target_started) * 1000,
+                    )
+                )
+                continue
+
+            prepared_orders.append(PreparedCopyOrder(target=target, request_payload=request_payload))
+        logger.info(
+            "live_copy.batch_prepared",
+            extra={
+                "session_id": str(session.id),
+                "target_count": len(targets),
+                "prepared_count": len(prepared_orders),
+                "skipped_count": len(skipped_results),
+                "preparation_duration_ms": round((perf_counter() - preparation_started) * 1000, 3),
+            },
+        )
+        return tuple(prepared_orders), skipped_results
+
+    async def _place_prepared_order(
+        self,
+        session: CopySession,
+        prepared: PreparedCopyOrder,
+        broker_router: BrokerRouterClient,
+        dispatch_started_perf: float,
+        dispatch_started_at: str,
+        semaphore: asyncio.Semaphore | None,
+    ) -> CopyTargetResult:
+        if semaphore:
+            async with semaphore:
+                return await self._place_prepared_order_now(
+                    session,
+                    prepared,
+                    broker_router,
+                    dispatch_started_perf,
+                    dispatch_started_at,
+                )
+        return await self._place_prepared_order_now(
+            session,
+            prepared,
+            broker_router,
+            dispatch_started_perf,
+            dispatch_started_at,
+        )
+
+    async def _place_prepared_order_now(
+        self,
+        session: CopySession,
+        prepared: PreparedCopyOrder,
+        broker_router: BrokerRouterClient,
+        dispatch_started_perf: float,
+        dispatch_started_at: str,
+    ) -> CopyTargetResult:
+        target = prepared.target
+        started = perf_counter()
+        started_at = _utc_timestamp()
+        start_offset_ms = (started - dispatch_started_perf) * 1000
+        logger.info(
+            "live_copy.copier_order_started",
+            extra={
+                "session_id": str(session.id),
+                "copy_group_id": str(target.copy_group_id),
+                "copy_account_id": str(target.copy_account.id),
+                "sizing_mode": str(target.setting.sizing_mode),
+                "dispatch_started_at": dispatch_started_at,
+                "order_started_at": started_at,
+                "dispatch_start_offset_ms": round(start_offset_ms, 3),
+            },
+        )
+        try:
+            response_payload = await broker_router.place_order(target.copy_account.id, prepared.request_payload)
+            order_status = CopiedTradeOrderStatus.PLACED
+            child_order_id = extract_child_order_id(response_payload)
+            error_message = None
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, str) else json.dumps(exc.detail, default=str)
+            order_status = CopiedTradeOrderStatus.FAILED
+            response_payload = {"error": exc.detail}
+            child_order_id = None
+            error_message = detail
+        except Exception as exc:
+            logger.exception("Live copy order placement failed", extra={"copy_account_id": str(target.copy_account.id)})
+            order_status = CopiedTradeOrderStatus.FAILED
+            response_payload = {"error": str(exc)}
+            child_order_id = None
+            error_message = str(exc)
+        duration_ms = (perf_counter() - started) * 1000
+        completed_at = _utc_timestamp()
+        logger.info(
+            "live_copy.copier_order_finished",
+            extra={
+                "session_id": str(session.id),
+                "copy_group_id": str(target.copy_group_id),
+                "copy_account_id": str(target.copy_account.id),
+                "status": order_status.value,
+                "duration_ms": round(duration_ms, 3),
+                "order_started_at": started_at,
+                "order_completed_at": completed_at,
+                "dispatch_start_offset_ms": round(start_offset_ms, 3),
+            },
+        )
+        return CopyTargetResult(
+            target=target,
+            order_status=order_status,
+            request_payload=prepared.request_payload,
+            response_payload=response_payload,
+            child_order_id=child_order_id,
+            error_message=error_message,
+            duration_ms=duration_ms,
+            dispatch_started_at=dispatch_started_at,
+            started_at=started_at,
+            completed_at=completed_at,
+            start_offset_ms=start_offset_ms,
+        )
+
+    @staticmethod
+    def _result_from_exception(prepared: PreparedCopyOrder, exc: Exception) -> CopyTargetResult:
+        logger.error(
+            "Live copy dispatch task crashed",
+            extra={"copy_account_id": str(prepared.target.copy_account.id)},
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        timestamp = _utc_timestamp()
+        return CopyTargetResult(
+            target=prepared.target,
+            order_status=CopiedTradeOrderStatus.FAILED,
+            request_payload=prepared.request_payload,
+            response_payload={"error": str(exc)},
+            child_order_id=None,
+            error_message=str(exc),
+            duration_ms=0,
+            started_at=timestamp,
+            completed_at=timestamp,
+        )
+
+    @staticmethod
+    def _with_dispatch_gaps(results: list[CopyTargetResult]) -> list[CopyTargetResult]:
+        indexed_offsets = sorted(
+            (index, result.start_offset_ms)
+            for index, result in enumerate(results)
+            if result.start_offset_ms is not None
+        )
+        previous_offset: float | None = None
+        output = list(results)
+        for index, offset in indexed_offsets:
+            gap = 0.0 if previous_offset is None else offset - previous_offset
+            output[index] = replace(output[index], dispatch_gap_ms=gap)
+            previous_offset = offset
+        return output
 
     async def _copy_one_target(
         self,
@@ -619,9 +1178,10 @@ class LiveCopyManager:
         normalized: NormalizedTradeEvent,
         setting: CopySetting,
         copy_account: BrokerAccount,
+        risk_usage: CopyRiskUsage | None = None,
     ) -> tuple[CopiedTradeOrderStatus, dict[str, Any], dict[str, Any], str | None, str | None]:
         try:
-            request_payload = build_sharekhan_copy_order_payload(normalized, setting, copy_account)
+            request_payload = build_sharekhan_copy_order_payload(normalized, setting, copy_account, risk_usage)
         except CopySkip as exc:
             return CopiedTradeOrderStatus.SKIPPED, {}, {"skipped": True}, None, str(exc)
 

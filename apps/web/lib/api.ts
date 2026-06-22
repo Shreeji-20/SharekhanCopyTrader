@@ -67,6 +67,9 @@ export async function apiFetch<T>(path: string, init: RequestInit & {timeoutMs?:
     if (error instanceof DOMException && error.name === "AbortError") {
       throw new ApiError(408, "API request timed out. Please try again.");
     }
+    if (error instanceof TypeError) {
+      throw new ApiError(0, `Could not reach the API at ${API_URL}. Check that the backend is running.`);
+    }
     throw error;
   } finally {
     window.clearTimeout(timeout);
