@@ -7,7 +7,7 @@ The application is organized as a multi-service monorepo. Each service has a nar
 | Component | Path | Responsibility |
 | --- | --- | --- |
 | Web app | `apps/web` | Next.js operator UI for login, dashboards, accounts, copy groups, live copy, Script Master search/watchlists, portfolio views, risk settings, logs, and settings. |
-| Main API | `apps/api` | User authentication, account CRUD, credential encryption, copy group/settings management, Script Master search/watchlists, dashboard metrics, and operational read APIs. |
+| Main API | `apps/api` | User authentication, admin user archives, account CRUD, credential encryption, copy group/settings management, Script Master search/watchlists, dashboard metrics, and operational read APIs. |
 | Broker router | `apps/broker-router` | Internal broker gateway that decrypts account credentials, builds raw Sharekhan HTTP requests, handles token exchange, places orders, and manages Sharekhan WebSocket sessions. |
 | Copy worker | `apps/worker` | Redis queue consumer that turns master order jobs into copy orders after risk checks and broker-router placement. |
 | Shared package | `packages/shared` | TypeScript constants and common frontend-facing types. |
@@ -50,6 +50,7 @@ The web app does not directly talk to broker-router or Sharekhan.
 The main API is the public backend boundary for authenticated users. It owns:
 
 - User registration and login.
+- Admin-only complete user-record import/export with conflict validation and audit logging.
 - JWT issuing and request authentication.
 - User/account access checks.
 - Encrypted broker account storage.
@@ -192,6 +193,7 @@ sequenceDiagram
 | Sharekhan feed / order ack messages | Sharekhan stream | Broker router | WebSocket | Redis pub/sub channel `sharekhan:ticks` today; future implementation should type or split feed and ack messages |
 | Main live updates | Web | Main API | WebSocket | None, heartbeat only |
 | Script Master search/watchlist | Browser | Main API | HTTP JSON | `script_master_watchlist_items` for add/remove mutations |
+| User archive | Admin browser | Main API | Versioned HTTP JSON | Upserts `users`; writes export/import audit records |
 
 ## Trust Boundaries
 

@@ -327,6 +327,14 @@ Patterns:
 - Raw provider fields belong in a bounded expandable `<details>` region with its own scroll area.
 - Loading, empty, and error states occupy the table body without shifting the table dimensions.
 
+### Settings User Archive
+
+- Render complete user import/export controls only after `/auth/me` confirms `ADMIN`.
+- Pair explicit icon+text commands for Export Users, Choose Archive, and Import Users.
+- Show a restrained destructive-tone warning because downloads contain password hashes.
+- Keep the file input visually hidden and display the selected filename and bounded size separately.
+- Require confirmation immediately before import and show Total, Created, Updated, and Unchanged counts afterward.
+
 ### Callback/Transient Screens
 
 - Center a single compact card.

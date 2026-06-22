@@ -1,6 +1,7 @@
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
@@ -34,6 +35,72 @@ class UserRead(BaseModel):
     role: UserRole
     is_active: bool
     created_at: datetime
+
+
+class UserArchiveRecord(BaseModel):
+    id: uuid.UUID
+    email: EmailStr
+    password_hash: str = Field(min_length=60, max_length=255)
+    role: UserRole
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def normalize_archive_email(cls, value: Any) -> Any:
+        return value.strip().lower() if isinstance(value, str) else value
+
+    @field_validator("password_hash")
+    @classmethod
+    def validate_password_hash(cls, value: str) -> str:
+        if not re.fullmatch(r"\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}", value):
+            raise ValueError("password_hash must be a bcrypt hash")
+        return value
+
+    @field_validator("created_at", "updated_at")
+    @classmethod
+    def validate_archive_timestamp(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("archive timestamps must include a timezone")
+        return value
+
+    @model_validator(mode="after")
+    def validate_archive_timestamp_order(self) -> "UserArchiveRecord":
+        if self.updated_at < self.created_at:
+            raise ValueError("updated_at cannot be earlier than created_at")
+        return self
+
+
+class UserArchive(BaseModel):
+    format: Literal["sharekhan-copy-trader.users"] = "sharekhan-copy-trader.users"
+    version: Literal[1] = 1
+    exported_at: datetime
+    users: list[UserArchiveRecord] = Field(min_length=1, max_length=10000)
+
+    @field_validator("exported_at")
+    @classmethod
+    def validate_export_timestamp(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("exported_at must include a timezone")
+        return value
+
+    @model_validator(mode="after")
+    def validate_unique_users(self) -> "UserArchive":
+        ids = [record.id for record in self.users]
+        emails = [record.email.lower() for record in self.users]
+        if len(ids) != len(set(ids)):
+            raise ValueError("archive contains duplicate user ids")
+        if len(emails) != len(set(emails)):
+            raise ValueError("archive contains duplicate user emails")
+        return self
+
+
+class UserImportResult(BaseModel):
+    total: int
+    created: int
+    updated: int
+    unchanged: int
 
 
 class LoginRequest(BaseModel):

@@ -32,7 +32,7 @@ The frontend lives in `apps/web`. It is a Next.js App Router application for ope
 | `app/holdings/page.tsx` | Live holdings table from `/holdings`. |
 | `app/trades/page.tsx` | Live trades table from `/trades`. |
 | `app/risk-settings/page.tsx` | Client-side risk settings UI scaffold. |
-| `app/settings/page.tsx` | Client-side security/order-mode settings scaffold. |
+| `app/settings/page.tsx` | Runtime security/order-mode status plus admin-only complete user archive export/import controls. |
 | `app/logs/page.tsx` | Live audit log table from `/logs`. |
 
 ## Shared Components
@@ -106,7 +106,7 @@ The root path redirects to dashboard.
 | Holdings | Live API: `GET /holdings` |
 | Trades | Live API: `GET /trades` |
 | Risk Settings | Legacy placeholder. Production risk settings are edited per copy account inside `/copy-groups/{id}`. |
-| Settings | Local state, browser confirm, and toast only |
+| Settings | Live API: `GET /system/trading-mode`, `GET /auth/me`, `GET /users/export`, `POST /users/import` |
 | Logs | Live API: `GET /logs` |
 
 ## Styling
@@ -214,6 +214,16 @@ The copy-flow panel shows an empty state until a real event series endpoint is a
 6. Both tables show loading, error, and empty states and use horizontal scrolling for the full instrument schema on narrow screens.
 
 See [Script Master Search And Watchlist](script-master-search-and-watchlist.md) for backend ownership and persistence behavior.
+
+### User Archive Administration
+
+1. Settings loads `/auth/me` and renders User Archive only for `ADMIN`.
+2. Export calls `GET /users/export`, formats the response JSON, and downloads it with a timestamped filename.
+3. File selection accepts JSON up to 10 MB and keeps the import action disabled until a file is selected.
+4. Import requires a browser confirmation because it can replace password hashes, roles, active state, IDs, and timestamps.
+5. A successful import displays Total, Created, Updated, and Unchanged counts.
+
+The exported file contains credential hashes and must not be committed or shared casually. See [User Import And Export](user-import-export.md).
 
 ## Auth And Routing Notes
 

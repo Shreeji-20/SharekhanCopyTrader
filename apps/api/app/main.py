@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
-from app.routers import accounts, auth, copy_groups, copy_sessions, copy_settings, dashboard, live, logs, portfolio, script_master, system
+from app.routers import accounts, auth, copy_groups, copy_sessions, copy_settings, dashboard, live, logs, portfolio, script_master, system, users
 from app.services.live_copy import live_copy_manager
 
 settings = get_settings()
@@ -34,6 +34,7 @@ async def stop_live_copy_sessions() -> None:
 
 
 app.include_router(auth.router)
+app.include_router(users.router)
 app.include_router(accounts.router)
 app.include_router(copy_groups.router)
 app.include_router(copy_sessions.router)

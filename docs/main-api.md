@@ -26,6 +26,7 @@ The main API lives in `apps/api`. It is a FastAPI service that exposes the user-
 | `app/audit.py` | Audit log helper. |
 | `app/services/broker_router.py` | Internal HTTP client for broker-router login URL and token exchange. |
 | `app/services/script_master.py` | Script Master normalization, database refresh, search data preparation, tick-size parsing, and missing-`scripCode` resolution for live copy. |
+| `app/routers/users.py` | Admin-only complete user-record export/import with archive validation, conflict checks, and audit events. |
 
 ## Authentication
 
@@ -53,6 +54,18 @@ Most routes are user scoped:
 - Copy groups are scoped by the owning user of the master account.
 - Copy settings are scoped by the owning user of the copy account.
 - Logs are scoped to `audit_logs.user_id` for non-admin users.
+- `/users/export` and `/users/import` require `ADMIN` and expose every stored user column, including password hashes.
+
+## User Archive
+
+| Method | Path | Description |
+| --- | --- | --- |
+| `GET` | `/users/export` | Export all `users` table columns in a versioned JSON archive with `Cache-Control: no-store`. Admin only. |
+| `POST` | `/users/import` | Validate and upsert a version-1 archive by user UUID. Admin only. |
+
+The archive preserves `id`, `email`, `password_hash`, `role`, `is_active`, `created_at`, and `updated_at`. Import creates missing UUIDs, fully updates changed UUIDs, counts identical rows, and does not delete users omitted from the file. Email/UUID conflicts reject the complete import. The current administrator cannot deactivate or demote their own record through import.
+
+See [User Import And Export](user-import-export.md) for the JSON contract and credential-handling requirements.
 
 ## Endpoint Reference
 

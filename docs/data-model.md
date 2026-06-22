@@ -49,6 +49,8 @@ erDiagram
 
 Stores application users.
 
+All columns in this table participate in the version-1 user archive exposed to administrators. Import preserves UUIDs, bcrypt password hashes, role, active state, and timestamps; it does not export or import related child tables.
+
 | Column | Purpose |
 | --- | --- |
 | `id` | UUID primary key. |

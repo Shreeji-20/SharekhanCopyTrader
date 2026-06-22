@@ -67,6 +67,10 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install-windows-autostart.ps1
 
 The scheduled task waits for Docker, runs `docker compose up -d`, and logs to `logs\docker-autostart.log`. See [Configuration And Deployment](docs/configuration-and-deployment.md#windows-auto-start-after-reboot) for verification and removal.
 
+### User Import And Export
+
+Administrators can open Settings to export every stored user field to a versioned JSON archive or import that archive with conflict-checked upsert behavior. The archive includes password hashes and must be handled as sensitive credential material. See [User Import And Export](docs/user-import-export.md) for the format and security requirements.
+
 ## Sharekhan Credential Setup
 
 Create broker accounts from the Accounts page or `POST /accounts`. Store the Sharekhan API Key, Secure Key, optional vendor key, and optional proxy scheme/host/port/ID/password details. Customer ID and channel user can be filled automatically during Sharekhan callback token exchange. The API encrypts credentials, sensitive proxy fields, request tokens, and access tokens with AES-GCM before writing to PostgreSQL and masks secrets in responses.

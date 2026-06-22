@@ -31,6 +31,15 @@ Response masking:
 
 Operational implication: `APP_SECRET_KEY` must be protected and backed up. If it changes without re-encrypting stored data, existing credentials and tokens cannot be decrypted. Account list responses mark such rows as `CREDENTIALS_LOCKED` so an operator can re-enter the API Key and Secure Key, then re-enter or clear optional vendor/proxy details, instead of the account list failing.
 
+### User Archives
+
+- `GET /users/export` and `POST /users/import` are restricted to `ADMIN` through the main API dependency layer.
+- User archives contain bcrypt password hashes and therefore remain sensitive even though plaintext passwords are never stored or exported.
+- Archive files must be encrypted at rest, access controlled, excluded from Git, and deleted from browser download folders when no longer needed.
+- Import accepts only versioned JSON with bcrypt-formatted hashes, unique IDs/emails, and timezone-aware timestamps.
+- Import rejects attempts to deactivate or demote the administrator performing the operation.
+- Import does not cascade-delete users absent from the archive and does not include broker credentials or trading records.
+
 ## Authentication And Authorization
 
 ### JWT

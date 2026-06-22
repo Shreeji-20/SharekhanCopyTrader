@@ -6,7 +6,7 @@ This document covers how to verify the app and operate it safely.
 
 | Service | Test path | Coverage |
 | --- | --- | --- |
-| API | `apps/api/tests/test_security_and_schemas.py`, `apps/api/tests/test_live_copy.py`, `apps/api/tests/test_script_master_watchlist.py` | Secret masking, encryption round trip, credential recovery, order validation, live copy ack normalization, Script Master parsing/matching, account authorization, duplicate watchlist behavior, snapshot fallback, and child order payload building. |
+| API | `apps/api/tests/test_security_and_schemas.py`, `apps/api/tests/test_live_copy.py`, `apps/api/tests/test_script_master_watchlist.py`, `apps/api/tests/test_user_archive.py` | Secret masking, encryption round trip, credential recovery, order validation, live copy behavior, Script Master behavior, plus complete user archive export/import validation and conflict handling. |
 | Broker-router | `apps/broker-router/tests/test_sharekhan_client.py` | Raw route URL construction, Sharekhan header/login URL construction, proxy composition, unreadable credential errors, raw request-token access payload, Sharekhan module subscription readiness parsing, connect-before-subscribe handling, and outbound order ack subscription payloads. |
 | Worker | `apps/worker/tests/test_risk_engine.py` | Quantity sizing, risk rejection, idempotency key stability, duplicate skip behavior, retry behavior. |
 
@@ -227,6 +227,7 @@ The script validates selected groups, starts a dry-run session, checks event/ord
 - Copy Group Detail edits risk settings per copy account inside each copy group.
 - Live Copy page starts dry-run sessions, pauses/resumes/stops/deletes sessions, displays master events plus copied order attempts, and shows stream diagnostics with recent sent/received WebSocket frames.
 - Script Master page searches normalized instruments, shows all normalized/raw fields, and keeps watchlists isolated by user and selected account.
+- Settings shows complete user archive import/export only to administrators and reports import result counts.
 - Missing `scripCode` events are enriched through Script Master when a unique match exists. The master event raw payload includes `script_master_resolution`.
 
 ## Troubleshooting
@@ -263,6 +264,9 @@ The script validates selected groups, starts a dry-run session, checks event/ord
 | Duplicate skips | Same master/account/request type already processed | Inspect `copy_orders.idempotency_key`. |
 | Web API calls fail | Missing token or wrong `NEXT_PUBLIC_API_URL` | Browser storage, network tab, API CORS settings. |
 | Web tables are empty | No persisted records exist yet | Create accounts/orders/log-producing actions, then refresh the relevant screen. |
+| User Archive card is missing | Signed-in user is not an administrator | Check `/auth/me`; only `role=ADMIN` can access full user records. |
+| User archive import returns `409` | An email belongs to another UUID or a concurrent uniqueness conflict occurred | Compare archive IDs/emails with the target database; correct the archive rather than forcing a partial import. |
+| User archive import returns `422` | Wrong format/version, duplicate records, plaintext/invalid hash, invalid role, or timezone-free timestamps | Use an unmodified export from this application and validate the JSON structure. |
 
 ## Database Inspection Queries
 
