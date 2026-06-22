@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:16
+    restart: unless-stopped
     environment:
       POSTGRES_DB: copytrading
       POSTGRES_USER: copytrader
@@ -17,6 +18,7 @@ services:
 
   redis:
     image: redis:7
+    restart: unless-stopped
     ports:
       - "6379:6379"
     healthcheck:
@@ -27,6 +29,7 @@ services:
 
   api:
     build: ./apps/api
+    restart: unless-stopped
     ports:
       - "8000:8000"
     depends_on:
@@ -39,6 +42,7 @@ services:
 
   broker-router:
     build: ./apps/broker-router
+    restart: unless-stopped
     ports:
       - "8001:8001"
     depends_on:
@@ -51,6 +55,7 @@ services:
 
   worker:
     build: ./apps/worker
+    restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
@@ -63,6 +68,7 @@ services:
 
   web:
     build: ./apps/web
+    restart: unless-stopped
     ports:
       - "3000:3000"
     depends_on:
@@ -72,4 +78,3 @@ services:
 
 volumes:
   postgres_data:
-

@@ -15,6 +15,8 @@ This app is designed to run locally through Docker Compose. Production deploymen
 
 Postgres and Redis have health checks. API, broker-router, worker, and web load environment variables from `.env`.
 
+Every long-running Compose service uses `restart: unless-stopped`. Docker recreates the service after a process failure and restarts it when the Docker engine returns. On Windows, Docker Desktop must also start after sign-in; the repository includes a scheduled-task installer for that purpose.
+
 ## Environment Variables
 
 Variables in `.env.example`:
@@ -143,6 +145,45 @@ docker compose logs -f broker-router
 docker compose logs -f worker
 docker compose logs -f web
 ```
+
+## Windows Auto-Start After Reboot
+
+The repository provides two complementary safeguards:
+
+1. `restart: unless-stopped` is configured for Postgres, Redis, API, broker-router, worker, and web.
+2. A per-user Windows Scheduled Task starts Docker Desktop when needed, waits for the Docker engine, and runs `docker compose up -d` from this repository after sign-in.
+
+Install the task once from a normal PowerShell window in the repository root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-windows-autostart.ps1 -RunNow
+```
+
+The default task name is `SharekhanCopyTrader-Docker-Autostart`. `-RunNow` starts it immediately for a smoke test; omit that switch when only installing it.
+
+Verify the task and containers:
+
+```powershell
+Get-ScheduledTask -TaskName SharekhanCopyTrader-Docker-Autostart
+docker compose ps
+Get-Content .\logs\docker-autostart.log -Tail 50
+```
+
+The log file is ignored by Git. The task runs for the Windows user who installed it and starts after that user signs in, which matches Docker Desktop's per-user runtime model. If the repository is moved, rerun the installer from the new path so the task action is updated.
+
+Remove auto-start without stopping currently running containers:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\uninstall-windows-autostart.ps1
+```
+
+Operational notes:
+
+- Keep Docker Desktop installed in its default location or ensure `docker.exe` is on `PATH`.
+- The runner waits up to 180 seconds for the Docker engine. Failures are recorded in `logs\docker-autostart.log`.
+- `docker compose down` removes the containers; the next logon task recreates them.
+- `docker compose stop` stops them temporarily, but the next logon task starts them again through `docker compose up -d`.
+- To prevent automatic startup for maintenance, disable the scheduled task or uninstall it before stopping the stack.
 
 ## Production Deployment Checklist
 

@@ -57,6 +57,16 @@ docker compose exec api alembic upgrade head
 
 The frontend runs at `http://localhost:3000`, the main API at `http://localhost:8000`, and broker-router at `http://localhost:8001`.
 
+### Start Automatically After Windows Restart
+
+All Compose services use `restart: unless-stopped`. To also start Docker Desktop and this Compose project when you sign in to Windows, run once from PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-windows-autostart.ps1 -RunNow
+```
+
+The scheduled task waits for Docker, runs `docker compose up -d`, and logs to `logs\docker-autostart.log`. See [Configuration And Deployment](docs/configuration-and-deployment.md#windows-auto-start-after-reboot) for verification and removal.
+
 ## Sharekhan Credential Setup
 
 Create broker accounts from the Accounts page or `POST /accounts`. Store the Sharekhan API Key, Secure Key, optional vendor key, and optional proxy scheme/host/port/ID/password details. Customer ID and channel user can be filled automatically during Sharekhan callback token exchange. The API encrypts credentials, sensitive proxy fields, request tokens, and access tokens with AES-GCM before writing to PostgreSQL and masks secrets in responses.
